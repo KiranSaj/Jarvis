@@ -1,0 +1,567 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#03080f">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<title>JARVIS</title>
+<style>
+:root{
+  --void:#03080f;
+  --plate:#0a1420;
+  --cyan:#5fd3f3;       /* primary HUD blue */
+  --cyan-hot:#c4f1ff;   /* charging, peak power */
+  --azure:#1d6f9e;      /* deep blue, stealth */
+  --amber:#f0a92e;      /* warnings only */
+  --crimson:#e33b32;    /* battle */
+  --ink:#a4c2d6;
+  --ink-dim:#425c72;
+  --accent:var(--cyan);
+  --display:"Arial Narrow","Roboto Condensed","Helvetica Neue Condensed",system-ui,sans-serif;
+  --mono:ui-monospace,"SF Mono","Roboto Mono","DejaVu Sans Mono",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+html,body{height:100%;overflow:hidden;background:var(--void)}
+body{
+  font-family:var(--mono);color:var(--ink);
+  display:flex;align-items:center;justify-content:center;
+  padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left);
+  user-select:none;-webkit-user-select:none;
+}
+/* ambient */
+body::after{
+  content:"";position:fixed;inset:0;pointer-events:none;z-index:99;
+  background:radial-gradient(ellipse at center,rgba(60,160,210,.07) 0%,transparent 48%,rgba(0,0,0,.78) 100%);
+}
+
+/* ---------- boot gate ---------- */
+#gate{position:fixed;inset:0;z-index:200;display:flex;flex-direction:column;
+  align-items:center;justify-content:center;gap:2.5rem;background:var(--void);text-align:center;padding:2rem}
+#gate h1{font-family:var(--display);font-size:clamp(2.6rem,17vw,6rem);font-weight:700;
+  letter-spacing:.42em;text-indent:.42em;color:var(--cyan);line-height:1}
+#gate p{font-size:.7rem;letter-spacing:.24em;text-transform:uppercase;color:var(--ink-dim);max-width:22ch;line-height:2}
+#initBtn{
+  appearance:none;border:1px solid var(--cyan);background:transparent;color:var(--cyan);
+  font-family:var(--mono);font-size:.78rem;letter-spacing:.3em;text-transform:uppercase;
+  padding:1.15rem 2.4rem;border-radius:2px;cursor:pointer;
+}
+#initBtn:active{background:var(--cyan);color:var(--void)}
+#initBtn:focus-visible{outline:2px solid var(--amber);outline-offset:4px}
+
+/* ---------- boot log ---------- */
+#bootlog{position:fixed;inset:0;z-index:190;display:none;flex-direction:column;
+  justify-content:center;padding:2rem;gap:.55rem;background:var(--void);font-size:.7rem;letter-spacing:.12em}
+#bootlog div{color:var(--ink-dim);white-space:nowrap;overflow:hidden}
+#bootlog b{color:var(--cyan);font-weight:400}
+#bootlog i{color:var(--crimson);font-style:normal}
+
+/* ---------- hud ---------- */
+#hud{position:fixed;inset:0;display:none}
+.corner{position:absolute;font-size:.6rem;letter-spacing:.2em;text-transform:uppercase;line-height:1.9}
+.tl{top:1.4rem;left:1.4rem}
+.tr{top:1.4rem;right:1.4rem;text-align:right}
+.corner span{color:var(--ink-dim)}
+.corner b{color:var(--accent);font-weight:400}
+.corner .bad{color:var(--crimson)}
+
+/* signature: the reactor */
+#reactor{position:absolute;top:50%;left:50%;width:min(62vw,300px);height:min(62vw,300px);
+  transform:translate(-50%,-50%)}
+#reactor svg{width:100%;height:100%;overflow:visible}
+.ring{fill:none;stroke:var(--accent);transform-box:fill-box;transform-origin:center}
+#coreGlow{fill:var(--accent);filter:blur(14px);opacity:.28}
+#core{fill:var(--accent)}
+#spin{animation:spin 9s linear infinite}
+#spinRev{animation:spin 14s linear infinite reverse}
+#breathe{animation:breathe 3.6s ease-in-out infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+@keyframes breathe{0%,100%{opacity:.22}50%{opacity:.5}}
+body.listening #reactor{animation:pulseFast 1.1s ease-in-out infinite}
+body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
+@keyframes pulseFast{0%,100%{transform:translate(-50%,-50%) scale(1)}50%{transform:translate(-50%,-50%) scale(1.045)}}
+
+#stateLabel{position:absolute;top:calc(50% + min(34vw,168px));left:0;right:0;text-align:center;
+  font-family:var(--display);font-size:1rem;letter-spacing:.5em;text-indent:.5em;
+  text-transform:uppercase;color:var(--accent)}
+
+#feed{position:absolute;left:1.4rem;right:1.4rem;bottom:1.6rem;font-size:.72rem;line-height:1.85}
+#heard{color:var(--ink-dim);letter-spacing:.1em;text-transform:uppercase;min-height:1.4em}
+#said{color:var(--ink);margin-top:.5rem;max-height:5.5em;overflow:hidden}
+
+#gear{position:absolute;bottom:1.2rem;right:1.2rem;width:44px;height:44px;opacity:.16;
+  border:1px solid var(--ink);border-radius:50%;cursor:pointer}
+
+/* ---------- settings ---------- */
+#panel{position:fixed;inset:0;z-index:220;display:none;flex-direction:column;gap:.9rem;
+  background:var(--plate);padding:1.6rem;overflow-y:auto}
+#panel h2{font-family:var(--display);font-size:1.1rem;letter-spacing:.36em;color:var(--cyan);
+  text-transform:uppercase;margin-bottom:.4rem}
+#panel label{display:block;font-size:.6rem;letter-spacing:.22em;text-transform:uppercase;
+  color:var(--ink-dim);margin-bottom:.35rem}
+#panel input,#panel select{width:100%;background:var(--void);border:1px solid #1e2733;color:var(--ink);
+  font-family:var(--mono);font-size:.85rem;padding:.7rem;border-radius:2px}
+#panel input:focus,#panel select:focus{outline:1px solid var(--cyan)}
+#panel .row{margin-bottom:.2rem}
+#panel .note{font-size:.62rem;line-height:1.7;color:var(--ink-dim)}
+#panel .btns{display:flex;gap:.7rem;margin-top:.6rem}
+#panel button{flex:1;background:transparent;border:1px solid var(--cyan);color:var(--cyan);
+  font-family:var(--mono);font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;
+  padding:.9rem;border-radius:2px;cursor:pointer}
+#panel button.ghost{border-color:#1e2733;color:var(--ink-dim)}
+#panel button:active{background:var(--cyan);color:var(--void)}
+
+@media (prefers-reduced-motion:reduce){
+  #spin,#spinRev,#breathe,body.listening #reactor,body.speaking #reactor{animation:none}
+}
+</style>
+</head>
+<body>
+
+<!-- Web Bluetooth and the microphone both require a user gesture. This gate is that gesture. -->
+<div id="gate">
+  <h1>JARVIS</h1>
+  <p>Tap to bring the suit online</p>
+  <button id="initBtn">Initialise</button>
+</div>
+
+<div id="bootlog"></div>
+
+<div id="hud">
+  <div class="corner tl">
+    <div><span>Uplink</span> <b id="sUplink">—</b></div>
+    <div><span>Helmet</span> <b id="sHelmet">—</b></div>
+  </div>
+  <div class="corner tr">
+    <div><span>Faceplate</span> <b id="sPlate">—</b></div>
+    <div><span>Mode</span> <b id="sMode">Standby</b></div>
+  </div>
+
+  <div id="reactor">
+    <svg viewBox="0 0 200 200" aria-hidden="true">
+      <circle id="breathe" class="ring" cx="100" cy="100" r="92" stroke-width="1" opacity=".3"/>
+      <circle id="spin" class="ring" cx="100" cy="100" r="76" stroke-width="2"
+              stroke-dasharray="3 9" opacity=".8"/>
+      <circle id="spinRev" class="ring" cx="100" cy="100" r="62" stroke-width="1"
+              stroke-dasharray="26 14" opacity=".55"/>
+      <circle class="ring" cx="100" cy="100" r="46" stroke-width="1" opacity=".35"/>
+      <circle id="coreGlow" cx="100" cy="100" r="30"/>
+      <circle id="core" cx="100" cy="100" r="19" opacity=".9"/>
+      <circle cx="100" cy="100" r="19" fill="none" stroke="var(--void)" stroke-width="4" opacity=".5"/>
+    </svg>
+  </div>
+
+  <div id="stateLabel">Standby</div>
+
+  <div id="feed">
+    <div id="heard"></div>
+    <div id="said"></div>
+  </div>
+
+  <div id="gear" title="Hold to open settings"></div>
+</div>
+
+<div id="panel">
+  <h2>Settings</h2>
+  <div class="row"><label for="pName">Pilot's name</label><input id="pName" placeholder="e.g. Shreejay"></div>
+  <div class="row"><label for="pProvider">AI source</label>
+    <select id="pProvider">
+      <option value="anthropic">Anthropic API</option>
+      <option value="ollama">Ollama on home PC</option>
+      <option value="openai">OpenAI-compatible</option>
+    </select></div>
+  <div class="row"><label for="pEndpoint">Endpoint</label><input id="pEndpoint" placeholder="auto"></div>
+  <div class="row"><label for="pModel">Model</label><input id="pModel" placeholder="model name"></div>
+  <div class="row"><label for="pKey">API key</label><input id="pKey" type="password" placeholder="leave blank for Ollama"></div>
+  <div class="row"><label for="pVoice">Voice</label><select id="pVoice"></select></div>
+  <p class="note">The key is stored on this phone only. Set a monthly spend cap in your provider's
+  dashboard. For Ollama, start it with OLLAMA_ORIGINS=* so the browser is allowed to reach it.</p>
+  <div class="btns">
+    <button class="ghost" id="pTest">Test voice</button>
+    <button id="pSave">Save</button>
+  </div>
+</div>
+
+<script>
+"use strict";
+
+/* ---------- storage that degrades gracefully ---------- */
+const mem = {};
+const store = {
+  get(k, d){ try { const v = localStorage.getItem(k); return v === null ? (k in mem ? mem[k] : d) : v; }
+             catch(e){ return k in mem ? mem[k] : d; } },
+  set(k, v){ mem[k] = v; try { localStorage.setItem(k, v); } catch(e){} }
+};
+
+const cfg = {
+  name:     store.get('name', ''),
+  provider: store.get('provider', 'anthropic'),
+  endpoint: store.get('endpoint', ''),
+  model:    store.get('model', ''),
+  key:      store.get('key', ''),
+  voice:    store.get('voice', '')
+};
+const DEFAULTS = {
+  anthropic: { endpoint:'https://api.anthropic.com/v1/messages', model:'claude-haiku-4-5-20251001' },
+  ollama:    { endpoint:'http://192.168.1.50:11434/api/chat',    model:'qwen2.5:3b' },
+  openai:    { endpoint:'https://api.openai.com/v1/chat/completions', model:'gpt-4o-mini' }
+};
+
+/* ---------- elements ---------- */
+const $ = id => document.getElementById(id);
+const hud = $('hud'), gate = $('gate'), bootlog = $('bootlog'), panel = $('panel');
+const heardEl = $('heard'), saidEl = $('said'), stateLabel = $('stateLabel');
+
+/* ---------- state ---------- */
+let recog = null, wantListening = false, awaitingCommand = false;
+let bleChar = null, speaking = false, plateOpen = false;
+let history = [];
+
+function setState(label, cls){
+  stateLabel.textContent = label;
+  document.body.className = cls || '';
+}
+function setAccent(colorVar){
+  document.documentElement.style.setProperty('--accent', colorVar);
+}
+function status(id, text, bad){
+  const el = $(id); el.textContent = text; el.className = bad ? 'bad' : '';
+}
+
+/* ---------- boot ---------- */
+$('initBtn').addEventListener('click', boot);
+
+async function boot(){
+  gate.style.display = 'none';
+  bootlog.style.display = 'flex';
+  const lines = [];
+  const log = async (label, value, bad) => {
+    const d = document.createElement('div');
+    d.innerHTML = label.padEnd(22, '.') + (bad ? ' <i>'+value+'</i>' : ' <b>'+value+'</b>');
+    bootlog.appendChild(d); lines.push(d);
+    await sleep(260);
+  };
+
+  let micOK = false;
+  try { await navigator.mediaDevices.getUserMedia({audio:true}); micOK = true; } catch(e){}
+  await log('AUDIO INPUT', micOK ? 'ONLINE' : 'DENIED', !micOK);
+
+  await loadVoices();
+  await log('VOICE SYNTHESIS', 'ONLINE');
+
+  const online = navigator.onLine && (cfg.key || cfg.provider === 'ollama');
+  await log('UPLINK', online ? 'ONLINE' : 'NOT CONFIGURED', !online);
+  status('sUplink', online ? 'Ready' : 'Offline', !online);
+
+  await log('HELMET LINK', bleChar ? 'CONNECTED' : 'STANDALONE', false);
+  status('sHelmet', bleChar ? 'Linked' : 'None');
+  status('sPlate', 'Closed');
+
+  await log('WAKE WORD', 'ARMED');
+  await sleep(500);
+
+  bootlog.style.display = 'none';
+  hud.style.display = 'block';
+  requestWakeLock();
+  startListening();
+  speak(cfg.name ? `Good to see you, ${cfg.name}. All systems are online.`
+                 : 'All systems online. I am at your service.');
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+/* ---------- keep the screen awake ---------- */
+let wakeLock = null;
+async function requestWakeLock(){
+  try { wakeLock = await navigator.wakeLock.request('screen'); } catch(e){}
+}
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'visible'){ requestWakeLock(); if (wantListening) startListening(); }
+});
+
+/* ---------- speech recognition ----------
+   Chrome on Android quietly stops continuous recognition every minute or so.
+   The onend restart below is what keeps the helmet listening. Do not remove it. */
+function startListening(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR){ setState('No mic support'); return; }
+  if (recog) { try { recog.abort(); } catch(e){} }
+
+  recog = new SR();
+  recog.continuous = true;
+  recog.interimResults = true;
+  recog.lang = 'en-GB';
+
+  recog.onresult = e => {
+    let interim = '', final = '';
+    for (let i = e.resultIndex; i < e.results.length; i++){
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) final += t; else interim += t;
+    }
+    if (interim) heardEl.textContent = interim;
+    if (final) handleSpeech(final.trim().toLowerCase());
+  };
+  recog.onend = () => { if (wantListening && !speaking) setTimeout(startListening, 120); };
+  recog.onerror = e => { if (e.error === 'not-allowed') { wantListening = false; setState('Mic blocked'); } };
+
+  wantListening = true;
+  try { recog.start(); } catch(e){}
+  if (!speaking) setState('Standby', 'listening');
+}
+
+function stopListening(){
+  wantListening = false;
+  if (recog) { try { recog.stop(); } catch(e){} }
+}
+
+/* ---------- wake word ---------- */
+/* Speech engines mangle "Jarvis" in fairly predictable ways. */
+const WAKE = /\b(jarvis|jervis|javis|jarviss|jaris|service|charvis)\b/;
+
+function handleSpeech(text){
+  heardEl.textContent = text;
+  const m = text.match(WAKE);
+
+  if (m){
+    const after = text.slice(m.index + m[0].length).replace(/^[\s,.]+/, '');
+    if (after.length > 1){ awaitingCommand = false; dispatch(after); }
+    else { awaitingCommand = true; setState('Listening', 'listening'); chirp(); }
+    return;
+  }
+  if (awaitingCommand){ awaitingCommand = false; dispatch(text); }
+}
+
+/* ---------- commands that never touch the network ---------- */
+const LOCAL = [
+  { re:/(open|lift|raise).*(helmet|faceplate|visor|up)|faceplate up|open up/, run:() => plate(true) },
+  { re:/(close|lower|shut|seal).*(helmet|faceplate|visor|down|in)|faceplate down/, run:() => plate(false) },
+  { re:/lights? (on|up)/,     run:() => mode('STANDBY','Lights on.','var(--cyan)','Standby') },
+  { re:/lights? (off|out)/,   run:() => mode('OFF','Lights out.','var(--cyan)','Dark') },
+  { re:/battle mode|combat/,  run:() => mode('BATTLE','Battle mode. Weapons hot.','var(--crimson)','Battle') },
+  { re:/stealth/,             run:() => mode('STEALTH','Stealth engaged. Running quiet.','var(--azure)','Stealth') },
+  { re:/power down|shut down|stand down/, run:() => mode('OFF','Powering down. Rest well.','var(--cyan)','Standby') },
+  { re:/charge (the )?repulsors?/, run:() => mode('CHARGE','Repulsors charging. Stand clear.','var(--cyan-hot)','Charging') },
+  { re:/systems? check|diagnostics|suit status/, run:systemsCheck }
+];
+
+function dispatch(command){
+  for (const c of LOCAL){ if (c.re.test(command)) { c.run(); return; } }
+  ask(command);
+}
+
+function plate(open){
+  plateOpen = open;
+  ble(open ? 'OPEN' : 'CLOSE');
+  status('sPlate', open ? 'Open' : 'Closed');
+  speak(open ? 'Opening.' : 'Sealing you in.');
+}
+function mode(cmd, line, color, label){
+  ble('MODE:' + cmd);
+  setAccent(color);
+  status('sMode', label);
+  speak(line);
+}
+async function systemsCheck(){
+  const name = cfg.name || 'sir';
+  ble('MODE:CHARGE'); setAccent('var(--cyan-hot)'); status('sMode','Diagnostic');
+  await speakAwait('Running full systems check.');
+  await speakAwait('Power core, nominal.');
+  await speakAwait('Repulsors, charged and holding.');
+  await speakAwait('Faceplate servo, responding.');
+  ble('MODE:BATTLE'); setAccent('var(--crimson)');
+  await speakAwait('All systems green. ' + name + ', you are cleared for flight.');
+  ble('MODE:STANDBY'); setAccent('var(--cyan)'); status('sMode','Standby');
+}
+
+/* ---------- the AI ---------- */
+function systemPrompt(){
+  const n = cfg.name || 'the pilot';
+  return `You are JARVIS, the artificial intelligence inside an Iron Man helmet worn by ${n}, who is seven years old.
+Address them warmly, occasionally as "sir". You are dry, calm and unflappable, never silly.
+Keep every reply to two or three short sentences — they are hearing you, not reading you.
+Explain science simply and with real enthusiasm. Tell jokes and stories when asked.
+Never say anything frightening, violent or unkind. If you do not know something, say so plainly.
+Do not use emoji, markdown, asterisks or stage directions — everything you write is spoken aloud.`;
+}
+
+async function ask(question){
+  setState('Thinking');
+  history.push({role:'user', content:question});
+  if (history.length > 12) history = history.slice(-12);
+
+  try {
+    const reply = await callModel(question);
+    history.push({role:'assistant', content:reply});
+    speak(reply);
+  } catch (err){
+    history.pop();
+    speak(navigator.onLine
+      ? 'My uplink is refusing to answer. Check the settings, sir.'
+      : 'My uplink is down. I can still run the helmet, but I cannot think just now.');
+  }
+}
+
+async function callModel(question){
+  const p  = cfg.provider;
+  const ep = cfg.endpoint || DEFAULTS[p].endpoint;
+  const md = cfg.model    || DEFAULTS[p].model;
+  let url = ep, headers = {'Content-Type':'application/json'}, body;
+
+  if (p === 'anthropic'){
+    headers['x-api-key'] = cfg.key;
+    headers['anthropic-version'] = '2023-06-01';
+    // Without this header the browser request is rejected outright.
+    headers['anthropic-dangerous-direct-browser-access'] = 'true';
+    body = { model:md, max_tokens:300, system:systemPrompt(), messages:history };
+  } else if (p === 'ollama'){
+    body = { model:md, stream:false,
+             messages:[{role:'system',content:systemPrompt()}, ...history] };
+  } else {
+    headers['Authorization'] = 'Bearer ' + cfg.key;
+    body = { model:md, max_tokens:300,
+             messages:[{role:'system',content:systemPrompt()}, ...history] };
+  }
+
+  const res = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
+  if (!res.ok) throw new Error(res.status);
+  const data = await res.json();
+
+  if (p === 'anthropic') return data.content.filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
+  if (p === 'ollama')    return (data.message && data.message.content || '').trim();
+  return (data.choices[0].message.content || '').trim();
+}
+
+/* ---------- text to speech ---------- */
+let voices = [];
+function loadVoices(){
+  return new Promise(resolve => {
+    const grab = () => {
+      voices = speechSynthesis.getVoices();
+      if (voices.length){ fillVoiceList(); resolve(); }
+    };
+    grab();
+    if (!voices.length){ speechSynthesis.onvoiceschanged = grab; setTimeout(resolve, 1500); }
+  });
+}
+function pickVoice(){
+  if (cfg.voice){ const v = voices.find(v => v.name === cfg.voice); if (v) return v; }
+  const gb = voices.filter(v => /en[-_]GB/i.test(v.lang));
+  const male = gb.find(v => /male|daniel|arthur|george|oliver|alan/i.test(v.name));
+  return male || gb[0] || voices.find(v => /^en/i.test(v.lang)) || voices[0];
+}
+function fillVoiceList(){
+  const sel = $('pVoice'); sel.innerHTML = '';
+  voices.filter(v => /^en/i.test(v.lang)).forEach(v => {
+    const o = document.createElement('option');
+    o.value = v.name; o.textContent = v.name + ' — ' + v.lang;
+    if (v.name === cfg.voice) o.selected = true;
+    sel.appendChild(o);
+  });
+}
+
+/* Recognition must be stopped while speaking, or the helmet hears itself and loops. */
+function speak(text){ speakAwait(text); }
+function speakAwait(text){
+  return new Promise(resolve => {
+    saidEl.textContent = text;
+    stopListening();
+    speaking = true;
+    setState('Speaking', 'speaking');
+
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; }
+    u.rate = 0.96; u.pitch = 0.85;
+    u.onend = u.onerror = () => {
+      speaking = false;
+      setState('Standby', 'listening');
+      startListening();
+      resolve();
+    };
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+function chirp(){
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = 'sine'; o.frequency.setValueAtTime(880, ctx.currentTime);
+    o.frequency.exponentialRampToValueAtTime(1760, ctx.currentTime + 0.09);
+    g.gain.setValueAtTime(0.09, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+    o.connect(g); g.connect(ctx.destination); o.start(); o.stop(ctx.currentTime + 0.15);
+  } catch(e){}
+}
+
+/* ---------- bluetooth to the ESP32 (Nordic UART Service) ---------- */
+const NUS      = '6e400001-b5a3-f393-e0a9-e50e24dcca9e';
+const NUS_RX   = '6e400002-b5a3-f393-e0a9-e50e24dcca9e';
+
+async function connectBLE(){
+  if (!navigator.bluetooth){ status('sHelmet','Unsupported', true); return; }
+  try {
+    const dev = await navigator.bluetooth.requestDevice({ filters:[{ services:[NUS] }] });
+    dev.addEventListener('gattserverdisconnected', () => {
+      bleChar = null; status('sHelmet','Lost', true);
+    });
+    const server = await dev.gatt.connect();
+    const svc = await server.getPrimaryService(NUS);
+    bleChar = await svc.getCharacteristic(NUS_RX);
+    status('sHelmet','Linked');
+  } catch(e){ status('sHelmet','No link', true); }
+}
+function ble(cmd){
+  if (!bleChar) return;
+  try { bleChar.writeValue(new TextEncoder().encode(cmd + '\n')); } catch(e){}
+}
+
+/* ---------- settings, behind a deliberate long press ---------- */
+let holdTimer = null;
+const gear = $('gear');
+const startHold = e => { e.preventDefault(); holdTimer = setTimeout(openPanel, 900); };
+const endHold   = () => clearTimeout(holdTimer);
+gear.addEventListener('touchstart', startHold, {passive:false});
+gear.addEventListener('mousedown', startHold);
+['touchend','touchcancel','mouseup','mouseleave'].forEach(ev => gear.addEventListener(ev, endHold));
+
+function openPanel(){
+  $('pName').value = cfg.name;
+  $('pProvider').value = cfg.provider;
+  $('pEndpoint').value = cfg.endpoint;
+  $('pModel').value = cfg.model;
+  $('pKey').value = cfg.key;
+  $('pEndpoint').placeholder = DEFAULTS[cfg.provider].endpoint;
+  $('pModel').placeholder = DEFAULTS[cfg.provider].model;
+  panel.style.display = 'flex';
+  stopListening();
+}
+$('pProvider').addEventListener('change', e => {
+  $('pEndpoint').placeholder = DEFAULTS[e.target.value].endpoint;
+  $('pModel').placeholder = DEFAULTS[e.target.value].model;
+});
+$('pTest').addEventListener('click', () => {
+  cfg.voice = $('pVoice').value;
+  const u = new SpeechSynthesisUtterance('Systems nominal. I am ready when you are.');
+  const v = pickVoice(); if (v) { u.voice = v; u.lang = v.lang; }
+  u.rate = 0.96; u.pitch = 0.85;
+  speechSynthesis.cancel(); speechSynthesis.speak(u);
+});
+$('pSave').addEventListener('click', () => {
+  cfg.name = $('pName').value.trim();
+  cfg.provider = $('pProvider').value;
+  cfg.endpoint = $('pEndpoint').value.trim();
+  cfg.model = $('pModel').value.trim();
+  cfg.key = $('pKey').value.trim();
+  cfg.voice = $('pVoice').value;
+  Object.keys(cfg).forEach(k => store.set(k, cfg[k]));
+  status('sUplink', (cfg.key || cfg.provider === 'ollama') ? 'Ready' : 'Offline',
+         !(cfg.key || cfg.provider === 'ollama'));
+  panel.style.display = 'none';
+  startListening();
+  connectBLE();   // needs a gesture — the Save tap counts
+});
+</script>
+</body>
+</html>
