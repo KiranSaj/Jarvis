@@ -196,7 +196,7 @@ const store = {
 
 const cfg = {
   name:     store.get('name', ''),
-  provider: store.get('provider', 'anthropic'),
+  provider: store.get('provider', 'ollama'),
   endpoint: store.get('endpoint', ''),
   model:    store.get('model', ''),
   key:      store.get('key', ''),
@@ -204,7 +204,10 @@ const cfg = {
 };
 const DEFAULTS = {
   anthropic: { endpoint:'https://api.anthropic.com/v1/messages', model:'claude-haiku-4-5-20251001' },
-  ollama:    { endpoint:'http://192.168.1.50:11434/api/chat',    model:'qwen2.5:3b' },
+  // llama3.2:3b beat qwen3.5:0.8b and qwen3:4b on a six-question benchmark.
+  // The 0.8b was fast but wrong (said the Moon has no distance, measured in
+  // light-years); qwen3:4b leaked its raw reasoning as the answer every time.
+  ollama:    { endpoint:'http://localhost:11434/api/chat',    model:'llama3.2:3b' },
   openai:    { endpoint:'https://api.openai.com/v1/chat/completions', model:'gpt-4o-mini' }
 };
 
@@ -253,6 +256,17 @@ async function boot(){
   const online = navigator.onLine && (cfg.key || cfg.provider === 'ollama');
   await log('UPLINK', online ? 'ONLINE' : 'NOT CONFIGURED', !online);
   status('sUplink', online ? 'Ready' : 'Offline', !online);
+
+  // Nudge Ollama into loading the model while the boot log is still playing,
+  // so the first real question doesn't pay for it.
+  if (cfg.provider === 'ollama'){
+    const wep = cfg.endpoint || DEFAULTS.ollama.endpoint;
+    fetch(wep, {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ model: cfg.model || DEFAULTS.ollama.model,
+        stream:false, think:false, keep_alive:'30m',
+        options:{num_predict:1}, messages:[{role:'user',content:'hi'}] })
+    }).catch(()=>{});
+  }
 
   await log('HELMET LINK', bleChar ? 'CONNECTED' : 'STANDALONE', false);
   status('sHelmet', bleChar ? 'Linked' : 'None');
@@ -324,9 +338,19 @@ function handleSpeech(text){
   const m = text.match(WAKE);
 
   if (m){
-    const after = text.slice(m.index + m[0].length).replace(/^[\s,.]+/, '');
-    if (after.length > 1){ awaitingCommand = false; dispatch(after); }
-    else { awaitingCommand = true; setState('Listening', 'listening'); chirp(); }
+    // Words can sit either side of the name — "jarvis, open up" but equally
+    // "hi jarvis" or "open up jarvis". Only looking after the wake word threw
+    // away the whole utterance for anything phrased the second way, which left
+    // the helmet silently armed and looking like it had hung.
+    const before = text.slice(0, m.index).replace(/[\s,.]+$/, '');
+    const after  = text.slice(m.index + m[0].length).replace(/^[\s,.]+/, '');
+    const rest   = (after || before).trim();
+
+    if (rest.length > 1){ awaitingCommand = false; dispatch(rest); }
+    else {
+      console.log('[JARVIS] wake word only - armed, waiting for a command');
+      awaitingCommand = true; setState('Listening', 'listening'); chirp();
+    }
     return;
   }
   if (awaitingCommand){ awaitingCommand = false; dispatch(text); }
@@ -346,7 +370,10 @@ const LOCAL = [
 ];
 
 function dispatch(command){
-  for (const c of LOCAL){ if (c.re.test(command)) { c.run(); return; } }
+  for (const c of LOCAL){
+    if (c.re.test(command)) { console.log('[JARVIS] local command: "' + command + '"'); c.run(); return; }
+  }
+  console.log('[JARVIS] -> model: "' + command + '"');
   ask(command);
 }
 
@@ -415,7 +442,11 @@ async function callModel(question){
     headers['anthropic-dangerous-direct-browser-access'] = 'true';
     body = { model:md, max_tokens:300, system:systemPrompt(), messages:history };
   } else if (p === 'ollama'){
-    body = { model:md, stream:false,
+    // Qwen3 reasons before answering and Ollama leaves that ON by default.
+    // "Hi" cost 561 generated tokens for a 17-token reply; a real question
+    // burned 4080 tokens and returned an empty string. This is 28s vs 1s.
+    body = { model:md, stream:false, think:false, keep_alive:'30m',
+             options:{ num_predict:200, temperature:0.7 },
              messages:[{role:'system',content:systemPrompt()}, ...history] };
   } else {
     headers['Authorization'] = 'Bearer ' + cfg.key;
@@ -423,13 +454,45 @@ async function callModel(question){
              messages:[{role:'system',content:systemPrompt()}, ...history] };
   }
 
-  const res = await fetch(url, {method:'POST', headers, body:JSON.stringify(body)});
-  if (!res.ok) throw new Error(res.status);
-  const data = await res.json();
+  // Never let a stalled model leave the helmet hanging in silence.
+  const ctl = new AbortController();
+  const bail = setTimeout(() => ctl.abort(), 20000);
+  const t0 = performance.now();
+  let data;
+  try {
+    const res = await fetch(url, {method:'POST', headers, body:JSON.stringify(body), signal:ctl.signal});
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    data = await res.json();
+  } finally {
+    clearTimeout(bail);
+  }
+  console.log('[JARVIS] ' + p + ' replied in ' + Math.round(performance.now() - t0) + 'ms');
 
-  if (p === 'anthropic') return data.content.filter(b => b.type === 'text').map(b => b.text).join(' ').trim();
-  if (p === 'ollama')    return (data.message && data.message.content || '').trim();
-  return (data.choices[0].message.content || '').trim();
+  let text;
+  if (p === 'anthropic')   text = data.content.filter(b => b.type === 'text').map(b => b.text).join(' ');
+  else if (p === 'ollama') text = (data.message && data.message.content) || '';
+  else                     text = data.choices[0].message.content || '';
+
+  text = forSpeech(text);
+  if (!text) throw new Error('empty reply');
+  return text;
+}
+
+/* Small models ignore "no markdown" instructions, and the synthesiser reads
+   asterisks and hashes out loud. Strip them rather than trust the prompt. */
+function forSpeech(s){
+  return (s || '')
+    .replace(/<think>[\s\S]*?<\/think>/gi, '')          // stray inline reasoning
+    .replace(/```[\s\S]*?```/g, '')
+    .replace(/^#{1,6}\s*/gm, '')                        // headings
+    .replace(/^\s*[-*+]\s+/gm, '')                      // bullets
+    .replace(/\*\*|__|\*|_|`/g, '')                     // emphasis marks
+    .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, '')  // emoji
+    .replace(/\s+/g, ' ')
+    .trim()
+    // If num_predict clipped it mid-sentence, end on the last complete one.
+    .replace(/\s+[^.!?]*$/, m => /[.!?]/.test(m) ? m : '')
+    .trim();
 }
 
 /* ---------- text to speech ---------- */
