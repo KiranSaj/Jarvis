@@ -323,12 +323,19 @@ function startListening(){
       const t = e.results[i][0].transcript;
       if (e.results[i].isFinal) final += t; else interim += t;
     }
+    // Cut him off on the interim result - waiting for the final one meant the
+    // sentence had already finished and the next had begun. Nothing is
+    // dispatched here; the final result below does that, accurately.
+    if (speaking && interim) tryInterrupt(interim.trim().toLowerCase(), false);
+
     if (interim && !speaking) heardEl.textContent = interim;
     if (!final) return;
     const text = final.trim().toLowerCase();
-    // The mic now stays live while JARVIS talks, so most of what lands here
-    // during speech is JARVIS hearing his own voice. tryInterrupt sorts it out.
-    if (speaking) tryInterrupt(text); else handleSpeech(text);
+
+    // The mic stays live while JARVIS talks, so most finals arriving mid-speech
+    // are JARVIS hearing his own voice - never dispatch those as commands.
+    if (speaking) { tryInterrupt(text, true); return; }
+    handleSpeech(text);
   };
   // Always restart - the mic is no longer stopped while speaking.
   recog.onend = () => { if (wantListening) setTimeout(startListening, 120); };
@@ -361,20 +368,24 @@ const SETTLE_MS = 400;
 
 let speakStartedAt = 0, spokenNow = '', abandonSpeech = false;
 
-function tryInterrupt(text){
-  if (performance.now() - speakStartedAt < SETTLE_MS) return;
+/* Stopping and acting are split deliberately. Stopping has to happen on an
+   interim result - a final one only lands a second or two after he stops
+   speaking, which is far too late to feel like an interruption. Acting on what
+   he said waits for the final, which is the accurate one. */
+function tryInterrupt(text, andDispatch){
+  if (!speaking) return false;
+  if (performance.now() - speakStartedAt < SETTLE_MS) return false;
   const m = text.match(INTERRUPT);
-  if (!m) return;
-  if (spokenNow.includes(m[0])) return;      // he is hearing JARVIS say it
+  if (!m) return false;
+  if (spokenNow.includes(m[0])) return false;   // he is hearing JARVIS say it
 
   console.log('[JARVIS] interrupted with: "' + text + '"');
-  abandonSpeech = true;                      // lets multi-line sequences bail out
-  speechSynthesis.cancel();
-  speaking = false; spokenNow = '';
+  abandonSpeech = true;                         // lets multi-line sequences bail out
+  stopSpeaking();
   heardEl.textContent = text;
   chirp();
-  // He interrupted for a reason. Act on whatever he actually said.
-  setTimeout(() => handleSpeech(text), 60);
+  if (andDispatch) setTimeout(() => handleSpeech(text), 60);
+  return true;
 }
 
 /* ---------- wake word ---------- */
@@ -774,27 +785,52 @@ function fillVoiceList(){
 /* The mic stays live through speech so he can cut in - see tryInterrupt for
    the guards that stop the helmet hearing itself and looping. */
 function speak(text){ speakAwait(text); }
+
+/* Cancelling one utterance fires its end event a tick later. Without knowing
+   which utterance that event belongs to, a cancel meant for the previous line
+   would clear the flags belonging to the line just starting - leaving
+   `speaking` false while he was audibly still talking, so nothing could
+   interrupt him. Every utterance now checks it is still the current one
+   before touching shared state. */
+let currentUtterance = null;
+
+function stopSpeaking(){
+  currentUtterance = null;          // claim first: the end event fires later
+  speaking = false;
+  spokenNow = '';
+  speechSynthesis.cancel();
+  setState('Standby', 'listening');
+}
+
 function speakAwait(text){
   return new Promise(resolve => {
     saidEl.textContent = text;
+
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v) { u.voice = v; u.lang = v.lang; }
+    u.rate = 0.96; u.pitch = 0.85;
+
+    speechSynthesis.cancel();       // ends whatever was mid-sentence
+    currentUtterance = u;
     speaking = true;
     spokenNow = text.toLowerCase();
     speakStartedAt = performance.now();
     setState('Speaking', 'speaking');
     if (!wantListening) startListening();
 
-    const u = new SpeechSynthesisUtterance(text);
-    const v = pickVoice();
-    if (v) { u.voice = v; u.lang = v.lang; }
-    u.rate = 0.96; u.pitch = 0.85;
     u.onend = u.onerror = () => {
-      speaking = false;
-      spokenNow = '';
-      setState('Standby', 'listening');
-      if (!wantListening) startListening();
+      // Superseded or already stopped: resolve so any awaiting sequence
+      // unblocks, but leave the newer utterance's state alone.
+      if (currentUtterance === u){
+        currentUtterance = null;
+        speaking = false;
+        spokenNow = '';
+        setState('Standby', 'listening');
+        if (!wantListening) startListening();
+      }
       resolve();
     };
-    speechSynthesis.cancel();
     speechSynthesis.speak(u);
   });
 }
