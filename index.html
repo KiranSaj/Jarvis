@@ -175,6 +175,11 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
   <div class="row"><label for="pModel">Model</label><input id="pModel" placeholder="model name"></div>
   <div class="row"><label for="pKey">API key</label><input id="pKey" type="password" placeholder="leave blank for Ollama"></div>
   <div class="row"><label for="pVoice">Voice</label><select id="pVoice"></select></div>
+  <div class="row"><label for="pBarge">Interrupt him</label>
+    <select id="pBarge">
+      <option value="on">On — saying "Jarvis" cuts him off</option>
+      <option value="off">Off — mic sleeps while he talks</option>
+    </select></div>
   <p class="note">The key is stored on this phone only. Set a monthly spend cap in your provider's
   dashboard. For Ollama, start it with OLLAMA_ORIGINS=* so the browser is allowed to reach it.</p>
   <div class="btns">
@@ -200,7 +205,8 @@ const cfg = {
   endpoint: store.get('endpoint', ''),
   model:    store.get('model', ''),
   key:      store.get('key', ''),
-  voice:    store.get('voice', '')
+  voice:    store.get('voice', ''),
+  barge:    store.get('barge', 'on')
 };
 /* Served through the Caddy proxy on the LAN, Ollama sits behind /api on this
    same origin - which is what makes the microphone work (https is a secure
@@ -335,6 +341,11 @@ function startListening(){
     // The mic stays live while JARVIS talks, so most finals arriving mid-speech
     // are JARVIS hearing his own voice - never dispatch those as commands.
     if (speaking) { tryInterrupt(text, true); return; }
+
+    // The other half of the loop: once speech is cut off, the tail of his own
+    // sentence still arrives as a final. Dispatching that is what let him
+    // answer himself over and over.
+    if (isEcho(text)){ console.log('[JARVIS] ignored own voice: "' + text + '"'); return; }
     handleSpeech(text);
   };
   // Always restart - the mic is no longer stopped while speaking.
@@ -368,18 +379,82 @@ const SETTLE_MS = 400;
 
 let speakStartedAt = 0, spokenNow = '', abandonSpeech = false;
 
+/* ---------- echo suppression ----------
+   The helmet speaker sits inches from the phone mic, so the recogniser
+   transcribes JARVIS continuously while he talks. Left unchecked that is a
+   feedback loop: his own voice trips the interrupt, which clears `speaking`,
+   which lets the trailing final result be dispatched as a command, which makes
+   him speak again. He talks himself in circles.
+
+   The cost here is asymmetric. A missed interrupt means saying it twice; a
+   false one means a loop, which is frightening rather than merely annoying.
+   So this errs hard towards deciding something was his own voice. */
+let recentSpeech = '';        // outlives the utterance - echo lags behind it
+let speechEndedAt = 0;
+const ECHO_MEMORY_MS = 2500;  // how long his words could still be arriving
+const ECHO_TAIL_MS = 900;     // his audio is still in the air after cancel()
+
+const words = s => s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
+
+/* Longest run of *consecutive* heard words that appears consecutively in his
+   own speech, as a fraction of what was heard. Contiguity is the point: plain
+   word overlap flags any reply on the same subject, whereas real echo repeats
+   his phrasing in order. */
+function echoRun(heard, spoken){
+  const h = words(heard);
+  const s = ' ' + words(spoken).join(' ') + ' ';
+  let best = 0;
+  for (let i = 0; i < h.length; i++)
+    for (let j = h.length; j > i + best; j--)
+      if (s.includes(' ' + h.slice(i, j).join(' ') + ' ')){ best = j - i; break; }
+  return h.length ? best / h.length : 0;
+}
+
+function isEcho(text){
+  const since = performance.now() - speechEndedAt;
+  // The tail of his own sentence arrives just after it is cut off.
+  if (!speaking && since < ECHO_TAIL_MS) return true;
+
+  // Compare against his own words only while they could still be arriving.
+  // Keeping them indefinitely made him deaf to any command that repeated
+  // something he had just said - asking for "battle mode" shortly after
+  // "Battle mode. Weapons hot." looked exactly like an echo of it.
+  const against = speaking ? spokenNow : (since < ECHO_MEMORY_MS ? recentSpeech : '');
+  return against ? echoRun(text, against) >= 0.5 : false;
+}
+
+/* Last-resort circuit breaker. If the guards above are ever defeated - a voice
+   or room this was not tested in - repeated barges in a short window stop
+   barge-in outright rather than let him loop at a child. */
+let bargeLog = [], bargeOffUntil = 0;
+function bargeStorm(){
+  const t = performance.now();
+  bargeLog = bargeLog.filter(x => t - x < 8000);
+  bargeLog.push(t);
+  if (bargeLog.length > 4){
+    bargeOffUntil = t + 30000; bargeLog = [];
+    console.warn('[JARVIS] barge-in loop detected - disabled for 30s. Likely the mic hearing the speaker.');
+    return true;
+  }
+  return false;
+}
+
 /* Stopping and acting are split deliberately. Stopping has to happen on an
    interim result - a final one only lands a second or two after he stops
    speaking, which is far too late to feel like an interruption. Acting on what
    he said waits for the final, which is the accurate one. */
 function tryInterrupt(text, andDispatch){
   if (!speaking) return false;
+  if (cfg.barge === 'off') return false;
+  if (performance.now() < bargeOffUntil) return false;
   if (performance.now() - speakStartedAt < SETTLE_MS) return false;
   const m = text.match(INTERRUPT);
   if (!m) return false;
-  if (spokenNow.includes(m[0])) return false;   // he is hearing JARVIS say it
+  if (spokenNow.includes(m[0])) return false;   // he is saying the word himself
+  if (isEcho(text)) return false;               // the rest of it is his voice too
 
   console.log('[JARVIS] interrupted with: "' + text + '"');
+  if (bargeStorm()) { stopSpeaking(); return false; }
   abandonSpeech = true;                         // lets multi-line sequences bail out
   stopSpeaking();
   heardEl.textContent = text;
@@ -797,6 +872,8 @@ let currentUtterance = null;
 function stopSpeaking(){
   currentUtterance = null;          // claim first: the end event fires later
   speaking = false;
+  recentSpeech = spokenNow;         // keep it: the echo of it is still arriving
+  speechEndedAt = performance.now();
   spokenNow = '';
   speechSynthesis.cancel();
   setState('Standby', 'listening');
@@ -815,9 +892,15 @@ function speakAwait(text){
     currentUtterance = u;
     speaking = true;
     spokenNow = text.toLowerCase();
+    recentSpeech = text.toLowerCase();
     speakStartedAt = performance.now();
     setState('Speaking', 'speaking');
-    if (!wantListening) startListening();
+
+    // With barge-in off the mic sleeps while he talks. It cannot hear itself,
+    // so no loop is possible - the reliable fallback if the guards above still
+    // misbehave in a particular room or on a particular phone.
+    if (cfg.barge === 'off') stopListening();
+    else if (!wantListening) startListening();
 
     u.onend = u.onerror = () => {
       // Superseded or already stopped: resolve so any awaiting sequence
@@ -825,6 +908,8 @@ function speakAwait(text){
       if (currentUtterance === u){
         currentUtterance = null;
         speaking = false;
+        recentSpeech = spokenNow;   // echo of it keeps arriving for a moment
+        speechEndedAt = performance.now();
         spokenNow = '';
         setState('Standby', 'listening');
         if (!wantListening) startListening();
@@ -892,6 +977,7 @@ function openPanel(){
   $('pEndpoint').value = cfg.endpoint;
   $('pModel').value = cfg.model;
   $('pKey').value = cfg.key;
+  $('pBarge').value = cfg.barge;
   $('pEndpoint').placeholder = DEFAULTS[cfg.provider].endpoint;
   $('pModel').placeholder = DEFAULTS[cfg.provider].model;
   panel.style.display = 'flex';
@@ -915,6 +1001,8 @@ $('pSave').addEventListener('click', () => {
   cfg.model = $('pModel').value.trim();
   cfg.key = $('pKey').value.trim();
   cfg.voice = $('pVoice').value;
+  cfg.barge = $('pBarge').value;
+  bargeOffUntil = 0; bargeLog = [];   // clear any tripped circuit breaker
   Object.keys(cfg).forEach(k => store.set(k, cfg[k]));
   status('sUplink', (cfg.key || cfg.provider === 'ollama') ? 'Ready' : 'Offline',
          !(cfg.key || cfg.provider === 'ollama'));
