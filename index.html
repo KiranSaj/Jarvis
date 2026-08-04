@@ -177,8 +177,8 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
   <div class="row"><label for="pVoice">Voice</label><select id="pVoice"></select></div>
   <div class="row"><label for="pBarge">Interrupt him</label>
     <select id="pBarge">
-      <option value="on">On — saying "Jarvis" cuts him off</option>
       <option value="off">Off — mic sleeps while he talks</option>
+      <option value="on">On — experimental, he may hear himself</option>
     </select></div>
   <p class="note">The key is stored on this phone only. Set a monthly spend cap in your provider's
   dashboard. For Ollama, start it with OLLAMA_ORIGINS=* so the browser is allowed to reach it.</p>
@@ -199,6 +199,22 @@ const store = {
   set(k, v){ mem[k] = v; try { localStorage.setItem(k, v); } catch(e){} }
 };
 
+/* Barge-in is parked, not deleted. Interrupting him by voice needs the mic live
+   while the helmet speaker plays inches away from it, and nothing in the browser
+   can separate the two: the Web Speech API hands you text and nothing else, its
+   MediaStreamTrack input (which would let us feed it echo-cancelled audio)
+   shipped desktop-only, and Android's echo canceller sits on the voice-call
+   path, not the media path the speech synthesiser plays out of. What is left is
+   guessing from the transcript, which cannot be made reliable enough to point at
+   a child. Off until the stop signal comes from somewhere other than the mic.
+
+   Devices that saved it on during desktop testing are reset once, so the helmet
+   cannot go on his head still carrying that setting. */
+if (store.get('bargeParked', '') !== '1'){
+  store.set('barge', 'off');
+  store.set('bargeParked', '1');
+}
+
 const cfg = {
   name:     store.get('name', ''),
   provider: store.get('provider', 'ollama'),
@@ -206,7 +222,7 @@ const cfg = {
   model:    store.get('model', ''),
   key:      store.get('key', ''),
   voice:    store.get('voice', ''),
-  barge:    store.get('barge', 'on')
+  barge:    store.get('barge', 'off')
 };
 /* Served through the Caddy proxy on the LAN, Ollama sits behind /api on this
    same origin - which is what makes the microphone work (https is a secure
@@ -363,6 +379,10 @@ function stopListening(){
 }
 
 /* ---------- interrupting him mid-sentence ----------
+   OFF BY DEFAULT - see the note on `bargeParked` above for why, and leave it off
+   until the stop signal stops coming from the microphone. Everything below only
+   runs if the Settings toggle is turned back on deliberately.
+
    A real conversation lets you cut in. The mic is deliberately left live while
    JARVIS speaks so that is possible - but the helmet speaker sits inches from
    the phone mic, so nearly everything recognised during speech is JARVIS
@@ -896,13 +916,14 @@ function speakAwait(text){
     speakStartedAt = performance.now();
     setState('Speaking', 'speaking');
 
-    // With barge-in off the mic sleeps while he talks. It cannot hear itself,
-    // so no loop is possible - the reliable fallback if the guards above still
-    // misbehave in a particular room or on a particular phone.
+    // This is now the normal path: the mic sleeps while he talks, so it cannot
+    // hear itself and no feedback loop is possible.
     if (cfg.barge === 'off') stopListening();
     else if (!wantListening) startListening();
 
-    u.onend = u.onerror = () => {
+    let watchdog = 0;
+    const finish = () => {
+      clearTimeout(watchdog);
       // Superseded or already stopped: resolve so any awaiting sequence
       // unblocks, but leave the newer utterance's state alone.
       if (currentUtterance === u){
@@ -916,6 +937,14 @@ function speakAwait(text){
       }
       resolve();
     };
+
+    // With the mic asleep, an 'end' event that never arrives - Android Chrome is
+    // known to drop them - leaves the helmet deaf until someone reloads it. That
+    // was survivable while the mic stayed live through speech; now that it does
+    // not, wake the mic anyway on a generous upper bound for the utterance.
+    watchdog = setTimeout(finish, 4000 + text.length * 120);
+
+    u.onend = u.onerror = finish;
     speechSynthesis.speak(u);
   });
 }

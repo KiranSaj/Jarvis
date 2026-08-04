@@ -116,13 +116,48 @@ First-time LAN setup — certificates and firewall — is in `LAN-SETUP.md`.
 - **Everything the model says is spoken aloud**, never read. Keep replies to two
   or three sentences, and strip markdown — `forSpeech()` does this because small
   models emit `**bold**` and `### headings` regardless of instructions.
-- **Test the joke bank and validator after editing either.** There is a
-  standalone check that verifies no joke trips the validator, none repeat, none
-  contain non-ASCII, and that known-bad lines are still blocked.
+- **Test the joke bank and validator after editing either.** `node check.mjs`
+  verifies no joke trips the validator, none repeat, none contain non-ASCII,
+  that known-bad lines are still blocked, that ordinary science answers are
+  *not* blocked, and that every `LOCAL` command still routes offline. It reads
+  the `<script>` out of `index.html` in memory and writes nothing.
+  A `PostToolUse` hook in `.claude/settings.json` runs it automatically
+  whenever `index.html` is edited, so it does not depend on anyone remembering.
 - The child's name is entered in Settings and stored in `localStorage` on the
   device. Do not hard-code it anywhere.
 
 ---
+
+## Barge-in is parked — leave it off
+
+Interrupting him by voice ("Jarvis, stop") is behind the **Interrupt him** toggle
+in Settings and **ships off**. Devices that saved it on are reset once, via
+`bargeParked` in `localStorage`. Do not turn it back on by default.
+
+It is off because the browser cannot separate his voice from the child's when
+the helmet speaker sits inches from the phone mic:
+
+- The Web Speech API hands you text and nothing else — no audio, no levels, no
+  way to apply echo cancellation.
+- `MediaStreamTrack` input to `SpeechRecognition`, which would let us feed it a
+  cleaned stream, shipped Chrome 133 on desktop only. **Android is explicitly
+  excluded**, and the helmet is Android.
+- Android's echo canceller lives on the `VOICE_COMMUNICATION` capture path.
+  `speechSynthesis` plays out of the media path, so on most devices there is no
+  reference signal connecting the two.
+
+What is left is guessing from the transcript, which is what `isEcho()` and
+`echoRun()` do. That code stays in the file, unused, because the analysis in it
+is worth keeping — but it cannot be made reliable enough to point at a child.
+
+**Revisit it only via the input channel, not the heuristics.** A physical button
+on the helmet over BLE (the ESP32 is already there) is near-100% reliable and
+works offline; moving audio to an earbud or bone-conduction pad removes the echo
+at source and would make the existing code work as designed.
+
+With the mic asleep during speech, a `speechSynthesis` `end` event that never
+fires would leave the helmet deaf until reload. `speakAwait()` has a watchdog
+that wakes the mic regardless. Do not remove it while barge-in is off.
 
 ## Known gaps
 

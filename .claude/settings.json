@@ -18,5 +18,20 @@
       "PowerShell(Get-NetFirewallRule:*)",
       "PowerShell(Get-NetIPAddress:*)"
     ]
+  },
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node C:/repo/Jarvis/check.mjs --hook",
+            "timeout": 30,
+            "statusMessage": "Checking the joke bank and validator"
+          }
+        ]
+      }
+    ]
   }
 }
