@@ -202,12 +202,22 @@ const cfg = {
   key:      store.get('key', ''),
   voice:    store.get('voice', '')
 };
+/* Served through the Caddy proxy on the LAN, Ollama sits behind /api on this
+   same origin - which is what makes the microphone work (https is a secure
+   context) without tripping the mixed-content block that would kill a direct
+   http://...:11434 call. Opened straight off the laptop at localhost:8000,
+   there is no proxy, so talk to Ollama directly as before. */
+const VIA_PROXY = location.protocol === 'https:' ||
+                  (location.protocol === 'http:' &&
+                   location.hostname !== 'localhost' && location.hostname !== '127.0.0.1');
+
 const DEFAULTS = {
   anthropic: { endpoint:'https://api.anthropic.com/v1/messages', model:'claude-haiku-4-5-20251001' },
   // llama3.2:3b beat qwen3.5:0.8b and qwen3:4b on a six-question benchmark.
   // The 0.8b was fast but wrong (said the Moon has no distance, measured in
   // light-years); qwen3:4b leaked its raw reasoning as the answer every time.
-  ollama:    { endpoint:'http://localhost:11434/api/chat',    model:'llama3.2:3b' },
+  ollama:    { endpoint: VIA_PROXY ? '/api/chat' : 'http://localhost:11434/api/chat',
+               model:'llama3.2:3b' },
   openai:    { endpoint:'https://api.openai.com/v1/chat/completions', model:'gpt-4o-mini' }
 };
 

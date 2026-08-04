@@ -1,0 +1,60 @@
+# JARVIS on the home LAN.
+#
+# The whole point of this file is to put the app AND the Ollama API behind
+# ONE https origin. That solves three problems at once:
+#   - the microphone, Web Bluetooth and wake-lock only work in a "secure
+#     context" (https, or literally localhost). A plain LAN address is not one.
+#   - an https page is not allowed to call http://...:11434 (mixed content).
+#   - same origin means no CORS, so OLLAMA_ORIGINS stops mattering.
+
+{
+	# Issue certificates from Caddy's own local CA. No ACME, no internet.
+	local_certs
+	admin off
+
+	# TLS forbids IP addresses in SNI, so a browser opening https://192.168.0.243
+	# sends no server name at all and Caddy has nothing to match on - the
+	# handshake dies with "alert internal error". This names the certificate to
+	# fall back on. The IP cert carries an IP SAN, so it still validates cleanly
+	# for anyone typing the address directly.
+	default_sni 192.168.0.243
+}
+
+# ---- the app, over https ----------------------------------------------
+# Both names are listed so it works with no DNS at all (the IP), or with a
+# tidy name if a DNS entry is added on the router later.
+https://192.168.0.243, https://jarvis.home {
+	tls internal
+
+	# Ollama, reverse-proxied. Path is preserved, so /api/chat on this origin
+	# lands on /api/chat in Ollama exactly as it expects.
+	handle /api/* {
+		reverse_proxy host.docker.internal:11434 {
+			# A cold model load can take ~30s; don't cut it off.
+			transport http {
+				read_timeout 300s
+				write_timeout 300s
+			}
+		}
+	}
+
+	handle {
+		root * /srv
+		file_server
+	}
+}
+
+# ---- plain http: only to hand out the root certificate ------------------
+# Chicken-and-egg: a device cannot trust https until it has this file, so it
+# must be fetchable over http. A CA *certificate* is public information - only
+# its private key is secret - so serving it this way is fine.
+http://192.168.0.243, http://jarvis.home {
+	handle /root.crt {
+		root * /data/caddy/pki/authorities/local
+		file_server
+	}
+
+	handle {
+		redir https://{host}{uri} permanent
+	}
+}

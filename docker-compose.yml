@@ -1,0 +1,22 @@
+services:
+  caddy:
+    image: caddy:2-alpine
+    container_name: jarvis-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    extra_hosts:
+      # Lets the container reach Ollama running natively on the Windows host.
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - .:/srv:ro
+      # caddy_data MUST persist. It holds the local certificate authority.
+      # Lose it and every device has to install a new root certificate.
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:

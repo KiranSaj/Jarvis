@@ -1,0 +1,7 @@
+# Caddy's local CA certificate. Machine-specific and regenerated automatically
+# from the caddy_data volume - see LAN-SETUP.md. Never commit it.
+root.crt
+
+# Local transcript exports (may contain conversations with a child)
+transcripts/
+*.transcript.txt
