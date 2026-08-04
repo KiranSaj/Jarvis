@@ -5,3 +5,6 @@ root.crt
 # Local transcript exports (may contain conversations with a child)
 transcripts/
 *.transcript.txt
+
+# Build artifact from the JS syntax check
+jarvis_extracted.js
