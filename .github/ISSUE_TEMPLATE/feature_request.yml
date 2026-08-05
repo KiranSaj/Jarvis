@@ -1,0 +1,51 @@
+name: Feature request
+description: Suggest something the helmet should do
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Worth knowing before you write: the app is deliberately one
+        self-contained `index.html` with no dependencies and no build step, and
+        anything used while wearing the helmet needs to work with the network
+        down. See
+        [CONTRIBUTING.md](https://github.com/KiranSaj/Jarvis/blob/main/CONTRIBUTING.md).
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What is the problem
+      description: What does the helmet do today that it should do differently?
+    validations:
+      required: true
+
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like it to do
+    validations:
+      required: true
+
+  - type: dropdown
+    id: offline
+    attributes:
+      label: Does this need to work offline
+      description: >
+        Helmet control is on the LOCAL list and works with no network. Anything
+        going to the model does not.
+      options:
+        - "Yes — it is helmet control and must work offline"
+        - "No — it is a question for the model"
+        - Not sure
+    validations:
+      required: true
+
+  - type: textarea
+    id: safety
+    attributes:
+      label: Does this touch a safety rule
+      description: >
+        The servo, the LED brightness cap, `contentOK()`, or where jokes come
+        from. If so, say which one and why the change is safe. If not, say "no".
+    validations:
+      required: true

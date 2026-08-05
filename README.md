@@ -294,7 +294,18 @@ Honest about what has and has not been proven:
 
 ---
 
+## Contributing
+
+Pull requests are welcome. [CONTRIBUTING.md](CONTRIBUTING.md) covers the setup,
+the single test (`node check.mjs`, which CI also runs), the single-file
+constraint, and which parts of the design are not up for discussion. Adding a
+joke to the bank is the easiest useful change.
+
+Please report anything with a security or child-safety dimension privately —
+see [SECURITY.md](SECURITY.md).
+
 ## Licence
 
-No licence file is set yet. Until one is added, all rights are reserved by the
-author — ask before reusing this in something you publish.
+[MIT](LICENSE). Note the warranty disclaimer in particular: this moves a servo
+next to a child's face, and if you build one, the safety rules above are your
+responsibility to honour.

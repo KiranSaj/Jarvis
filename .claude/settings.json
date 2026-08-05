@@ -26,7 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node C:/repo/Jarvis/check.mjs --hook",
+            "command": "node \"$CLAUDE_PROJECT_DIR/check.mjs\" --hook",
             "timeout": 30,
             "statusMessage": "Checking the joke bank and validator"
           }

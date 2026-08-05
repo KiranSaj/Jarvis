@@ -1,0 +1,19 @@
+# Normalise line endings to LF in the repository.
+#
+# This is load-bearing, not cosmetic. check.mjs extracts the app's source by
+# slicing index.html on literal markers, one of which is `';\n'` — under CRLF
+# the text is `;\r\n`, the marker never matches, and the extraction throws.
+# That takes all twelve safety checks down with it, including the ones standing
+# between a 3B model and a seven-year-old's ears.
+#
+# index.html and check.mjs are LF today. Keep them that way on every platform.
+* text=auto eol=lf
+
+# Windows shells are happier with CRLF, and these are only ever run on Windows.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary — never touch these.
+*.ico binary
+*.crt binary

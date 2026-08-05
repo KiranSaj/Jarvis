@@ -1,0 +1,17 @@
+name: Safety check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: Joke bank and content validator
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # No install step: the app and the check have no dependencies.
+      - run: node check.mjs
