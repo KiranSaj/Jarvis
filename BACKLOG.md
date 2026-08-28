@@ -131,12 +131,19 @@ leave-one-out, tightest margin 0.073.
   name at all and handed back. Bad lines are also **spoken** now, not only logged, on the same
   reasoning the geocoder failure beside them already used: the panel has closed and looks as
   though it worked.
-- **The player was built without `origin`.** Without it the player never received video
-  metadata at all — `getDuration()` stayed 0 for over four minutes — and, far worse, `onError`
-  **never fired**, so an unplayable video presented as an unbounded silent buffer. With
-  `origin: location.origin` the same three ids fail properly through the existing bounded
-  `musicFails` walk in under a second, and he says so aloud. This one line is the difference
-  between the designed failure path running and not running at all.
+- **The player was built without `origin`, and that is why music never played.** Without it the
+  player never received video metadata at all — `getDuration()` stayed 0 for over four minutes,
+  `onError` **never fired**, and the whole thing presented as an unbounded silent buffer with
+  nothing to diagnose from. With `origin: location.origin` the same three ids play: verified on
+  `localhost:8000` at `getPlayerState() === 1`, `currentTime` advancing, 92 s of audio, stopped
+  cleanly by "jarvis stop the music".
+
+  **A correction worth keeping, because it nearly became a wrong entry in this file.** An
+  intermediate test served the app from `http://127.0.0.1:8010` and every track there returned
+  **player error 150**, which was written up as "the rights holder disallows embedding, these
+  ids can never play". That was wrong: 150 was an artefact of the test origin, and the same ids
+  play from `localhost:8000`. The lesson is the one this repo already knows in another form —
+  **verify which origin, not just which file, the finding came from.**
 - **Nothing bounded "the track never started".** `onStateChange` deliberately ignores BUFFERING
   (a mid-track stall, where the sound is coming back), and `onError` cannot be relied on — it
   did not fire once during the four-minute hang. A `MUSIC_START_MS` (20 s) guard now clears
@@ -161,11 +168,14 @@ individually and skip failures rather than dropping the batch.
   a song produces a stream of arbitrary finals. That is near-certain and completely unmeasured.
   The first run with music should simply watch how many
   `music is playing - ignoring "..."` lines appear per minute and what they contain.
-  **Still open after 2026-08-28**, and not for want of trying: the three tracks loaded that day
-  were official Marvel/VEVO uploads and every one returned **player error 150** — the rights
-  holder has disabled embedded playback — so no sound was ever produced. This measurement needs
-  tracks that actually embed. Check a candidate before adding it: an id that errors 150 will
-  never play in the helmet however the app is written.
+  **Partly measured on 2026-08-28, and the result was nothing at all.** Once `origin` was set
+  the tracks played properly: 92 s of "avengers" (Silvestri, an *instrumental* score) with the
+  microphone live produced **zero** `music is playing - ignoring "..."` lines. That is one
+  sample of the easiest case and must not be read as the rule being unnecessary — three
+  explanations are still open and this run cannot separate them: an instrumental track has no
+  words to transcribe; the echo canceller may be removing the music as far-end audio before the
+  recogniser ever sees it; or the microphone may simply not pick up these speakers. **A sung
+  track is the case the rule exists for** and it has still never been tried.
 - **The `musicOn` gate itself is verified**, separately from the sound. With `musicOn` true,
   `open up`, `lights off`, `battle mode`, `at your service`, `open up the faceplate now` and
   `turn the lights off` were every one ignored — the faceplate never moved and nothing was

@@ -142,10 +142,15 @@ every one ignored — the faceplate never moved, nothing was spoken. `jarvis sto
 through and stopped it. The gear stayed reachable with music on, and STOP MUSIC stopped
 playback on a real click. The round-2 trap (no way out but a reload) is not present.
 
-**No sound was ever produced, and the reason is not the app.** All three tracks were official
-Marvel/VEVO uploads and every one returned **player error 150** — the rights holder disallows
-embedded playback. Those ids can never play in the helmet. **Before adding a track, check it
-embeds**; an id that errors 150 is not a fixable app problem.
+**Music now plays, and the missing `origin` playerVar was why it did not.** Verified on the
+merged build at `localhost:8000`: `getPlayerState() === 1`, `currentTime` advancing, 92 s of
+audio out of the speakers, stopped cleanly by "jarvis stop the music". Before the fix the same
+ids sat in BUFFERING with `getDuration() === 0` for over four minutes and `onError` never fired.
+
+**Correction, recorded because it was briefly written down as fact:** an intermediate test
+served the app from `http://127.0.0.1:8010`, where every track returned **player error 150**,
+and that was reported as "the rights holder disallows embedding, these ids can never play". It
+was wrong — 150 was an artefact of that test origin. The ids are fine.
 
 **Three defects were found on the way there and are fixed** (see `BACKLOG.md` §2 for the full
 reasoning): `parseTracks` silently turned a bare pasted link into a track *named after its own
@@ -158,8 +163,10 @@ starts, silent after a deliberate stop).
 
 ### What is still unrun
 
-- **What a song actually transcribes as** — the measurement the whole `musicOn` rule rests on.
-  It needs a track that embeds; none of the three did.
+- **What a *sung* song transcribes as** — the measurement the whole `musicOn` rule rests on.
+  92 s of an instrumental Silvestri score produced zero `ignoring` lines, which is one sample
+  of the easiest case: no words, and the echo canceller possibly removing the music before the
+  recogniser sees it at all. A track with lyrics is the case the rule exists for.
 - **The arm timing** `(NNNN ms after the interrupt)`, and anything needing a real voice.
 - **`locate()`** — the run set coordinates directly, so the geolocation prompt is still unseen.
 - A `reviewer` pass. `CLAUDE.md` asks for one on a finished diff touching the music safety
