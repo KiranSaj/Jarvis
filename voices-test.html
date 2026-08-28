@@ -1,0 +1,672 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS — voice roster test</title>
+<!--
+  Phase 2, step 1. Answers one question before any of it goes into index.html:
+
+      can a cheap, dependency-free voice fingerprint tell these people apart?
+
+  The roster needs to separate three voices: the child, his father, and JARVIS.
+  The child is easy - a seven-year-old sits an octave above both adults and the
+  pitch gate already in index.html handles him. The hard pair is the father and
+  JARVIS, because JARVIS speaks with Ryan, an adult male voice. Pitch cannot
+  separate those two. Something about timbre has to.
+
+  The fingerprint here is deliberately simple, and it is not a neural speaker
+  embedding. Per frame: log energy in 24 log-spaced bands across the speech
+  range, mean-subtracted (which removes loudness and much of the channel) and
+  L2-normalised (which removes gain). Averaged over the voiced frames of an
+  utterance, that is a crude average spectral shape - the closest thing to a
+  speaker fingerprint that fits in one file with no model to download.
+
+  The number that decides everything is the similarity matrix below. If the
+  father and JARVIS score near 1.0 against each other, this approach is dead and
+  the roster needs a real embedding model. If they separate, it goes into the
+  app and the ONNX path stays on the shelf.
+
+  Serve it, don't open the file directly - getUserMedia needs a secure context:
+      .\start_the_server.bat   then  http://localhost:8000/voices-test.html
+-->
+<style>
+:root{
+  --void:#03080f; --plate:#0a1420; --plate-2:#0d1a29; --line:#1a2836;
+  --cyan:#5fd3f3; --cyan-hot:#c4f1ff; --amber:#f0a92e; --crimson:#e33b32;
+  --green:#4fd18b; --ink:#a4c2d6; --ink-strong:#dcecf6; --ink-dim:#5a7488;
+  --mono:ui-monospace,"SF Mono","Roboto Mono","DejaVu Sans Mono",monospace;
+  --display:"Arial Narrow","Roboto Condensed","Helvetica Neue Condensed",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--void);color:var(--ink);font-family:var(--mono);
+     font-size:14px;line-height:1.6;padding:2rem 1.25rem 5rem}
+.wrap{max-width:900px;margin:0 auto}
+h1{font-family:var(--display);font-size:2rem;letter-spacing:.18em;text-transform:uppercase;
+   color:var(--cyan);font-weight:600;margin-bottom:.35rem}
+.sub{color:var(--ink-dim);font-size:.82rem;margin-bottom:2.25rem}
+h2{font-family:var(--display);font-size:.78rem;letter-spacing:.28em;text-transform:uppercase;
+   color:var(--ink-dim);font-weight:600;margin:2.5rem 0 .9rem;
+   padding-bottom:.5rem;border-bottom:1px solid var(--line)}
+.card{background:var(--plate);border:1px solid var(--line);border-radius:3px;
+      padding:1.1rem 1.25rem;margin-bottom:1rem}
+.note{font-size:.78rem;color:var(--ink-dim);line-height:1.7}
+.note.tight{margin-bottom:.9rem}
+
+button{background:transparent;border:1px solid var(--cyan);color:var(--cyan);
+  font-family:var(--mono);font-size:.72rem;letter-spacing:.16em;text-transform:uppercase;
+  padding:.7rem 1.3rem;border-radius:2px;cursor:pointer}
+button:hover:not(:disabled){background:rgba(95,211,243,.09)}
+button:disabled{border-color:var(--line);color:var(--ink-dim);cursor:not-allowed}
+button.ghost{border-color:var(--line);color:var(--ink-dim);padding:.35rem .7rem;font-size:.62rem}
+button:focus-visible{outline:2px solid var(--cyan-hot);outline-offset:2px}
+input{background:var(--void);border:1px solid var(--line);color:var(--ink);
+  font-family:var(--mono);font-size:.85rem;padding:.68rem;border-radius:2px;flex:1;min-width:9rem}
+input:focus{outline:1px solid var(--cyan)}
+.controls{display:flex;gap:.7rem;flex-wrap:wrap;align-items:stretch;margin-bottom:.9rem}
+
+#stage{color:var(--cyan-hot);font-size:.85rem;min-height:1.4em;margin-top:.8rem}
+
+/* enrolled list */
+.voice{display:flex;justify-content:space-between;align-items:center;gap:1rem;
+  padding:.55rem 0;border-bottom:1px solid rgba(26,40,54,.6)}
+.voice:last-child{border-bottom:none}
+.voice b{color:var(--ink-strong);font-weight:600}
+.voice .meta{font-size:.72rem;color:var(--ink-dim)}
+.voice.jarvis b{color:var(--crimson)}
+
+/* matrix */
+.tablewrap{overflow-x:auto}
+table{border-collapse:collapse;font-size:.78rem;min-width:100%}
+th,td{padding:.5rem .7rem;text-align:center;border:1px solid var(--line);
+      font-variant-numeric:tabular-nums;white-space:nowrap}
+th{color:var(--ink-dim);font-weight:400;background:var(--plate-2)}
+th.rowh{text-align:left;color:var(--ink-strong)}
+td.self{color:var(--ink-dim);background:var(--plate-2)}
+td.hi{color:var(--crimson);font-weight:600}     /* too alike */
+td.mid{color:var(--amber)}
+td.lo{color:var(--green)}
+
+/* live */
+#live{display:grid;grid-template-columns:auto 1fr;gap:.4rem 1rem;font-size:.85rem}
+#live .k{color:var(--ink-dim)}
+#live .v{color:var(--ink-strong)}
+#who{font-size:1.35rem;font-family:var(--display);letter-spacing:.1em;color:var(--cyan)}
+#log{font-size:.72rem;color:var(--ink-dim);white-space:pre-wrap;max-height:220px;
+     overflow-y:auto;line-height:1.55}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Voice roster</h1>
+  <div class="sub">JARVIS Phase 2 · can a cheap fingerprint tell these voices apart?</div>
+
+  <h2>1 · Enrol</h2>
+  <div class="card">
+    <p class="note tight">
+      Type a name and hold <b style="color:var(--cyan-hot)">Record</b> while that person talks
+      normally for about five seconds — any words, but keep talking.
+      <b style="color:var(--cyan-hot)">Do three takes each, saying something different every
+      time.</b> One take is not enough: a single take scored its own speaker anywhere between
+      0.69 and 0.96 depending on what they happened to say, and the diagonal of the matrix below
+      is what tells you when you have enough.
+    </p>
+    <div class="controls">
+      <input id="name" placeholder="whose voice is this?" autocomplete="off">
+      <button id="rec">Record 5s</button>
+      <button id="recJarvis">Capture JARVIS</button>
+    </div>
+    <div id="stage"></div>
+  </div>
+
+  <h2>2 · Enrolled</h2>
+  <div class="card" id="list"><div class="note">Nobody yet.</div></div>
+
+  <h2>3 · The answer</h2>
+  <div class="card">
+    <p class="note tight">
+      How alike every pair sounds to the fingerprint, 0 to 1. <b style="color:var(--green)">Green
+      is separable</b>, <b style="color:var(--amber)">amber is marginal</b>,
+      <b style="color:var(--crimson)">red means the fingerprint cannot tell them apart</b>. The
+      pair that matters is whoever is closest to JARVIS.
+    </p>
+    <div class="tablewrap" id="matrix"><div class="note">Enrol at least two voices.</div></div>
+    <div id="verdict" class="note" style="margin-top:1rem"></div>
+  </div>
+
+  <h2>4 · Live</h2>
+  <div class="card">
+    <p class="note tight">Talk. This says who it thinks you are, updated every time you finish a phrase.</p>
+    <button id="liveBtn" disabled>Start listening</button>
+    <div id="live" style="margin-top:1rem">
+      <span class="k">Best match</span><span id="who">—</span>
+      <span class="k">Score</span><span class="v" id="score">—</span>
+      <span class="k">Runner-up</span><span class="v" id="second">—</span>
+      <span class="k">Pitch</span><span class="v" id="pitch">—</span>
+      <span class="k">Level</span><span class="v" id="level">—</span>
+    </div>
+  </div>
+
+  <h2>Log</h2>
+  <div class="card"><div id="log">—</div></div>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = s => document.querySelector(s);
+let logLines = [];
+function log(m){
+  logLines.push(m);
+  if (logLines.length > 200) logLines.shift();
+  const el = $('#log'); el.textContent = logLines.join('\n'); el.scrollTop = el.scrollHeight;
+}
+
+/* ---------- the fingerprint ----------
+   Mel-frequency cepstral coefficients: a triangular mel filterbank, log
+   energies, then a DCT, keeping coefficients 1 to 12.
+
+   The first attempt at this was simpler - log energy in 24 log-spaced bands,
+   mean-subtracted - and it failed its own test. At the bottom of the range
+   those bands were narrower than the spacing between a voice's harmonics, so
+   the vector ended up encoding the harmonic comb. That is pitch, which we
+   already measure separately, and it is precisely the wrong thing: the pair
+   this has to separate is the father and JARVIS, two adult male voices of
+   similar pitch.
+
+   The DCT is what fixes it. Low coefficients describe the slowly varying
+   spectral envelope - the vocal tract, which is what makes a voice sound like
+   a particular person - while the harmonic comb lives in the high ones and gets
+   discarded. Dropping coefficient zero drops loudness with it.
+
+   None of which makes this a neural speaker embedding. It is the best that fits
+   in one file with nothing to download, and the matrix below is what decides
+   whether that is enough. */
+/* 32 bands and 12 coefficients were chosen by sweeping both against synthetic
+   voices, not by convention. Every setting tried held same-speaker similarity at
+   0.999; 32 bands separated a child from an adult far better than 26 (0.18
+   against 0.35) for no cost anywhere else. */
+const MEL_BANDS = 32, MFCC_N = 12, F_LO = 300, F_HI = 7000;
+const VOICED_MIN_HZ = 70, VOICED_MAX_HZ = 400;
+const ACTIVE_DB = -45;          // quieter than this is not someone talking to us
+
+let ctx = null, analyser = null, freqBuf = null, timeBuf = null, pitchBuf = null, ncBuf = null;
+let melFilters = [], melEnergy = null, rate = 48000;
+
+const hzToMel = f => 2595 * Math.log10(1 + f / 700);
+const melToHz = m => 700 * (Math.pow(10, m / 2595) - 1);
+
+function setupAnalyser(stream){
+  ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(stream);
+  analyser = ctx.createAnalyser();
+  analyser.fftSize = 2048;
+  analyser.smoothingTimeConstant = 0;
+  src.connect(analyser);          // never to destination
+  rate = ctx.sampleRate;
+  freqBuf = new Float32Array(analyser.frequencyBinCount);
+  timeBuf = new Float32Array(analyser.fftSize);
+  pitchBuf = new Float32Array(Math.floor(analyser.fftSize / 4));
+
+  buildMel();
+  melEnergy = new Float32Array(MEL_BANDS);
+  log('analyser ready at ' + rate + ' Hz, ' + MEL_BANDS + ' mel bands, ' + MFCC_N + ' coefficients');
+}
+
+/* Triangular filters, evenly spaced on the mel scale and overlapping at their
+   half-points. The overlap is deliberate: it smears each filter across its
+   neighbours, which is the first thing that stops individual harmonics
+   dominating a band. */
+function buildMel(){
+  const lo = hzToMel(F_LO), hi = hzToMel(F_HI);
+  const pts = [];
+  for (let i = 0; i < MEL_BANDS + 2; i++)
+    pts.push(melToHz(lo + (hi - lo) * i / (MEL_BANDS + 1)) * analyser.fftSize / rate);
+  melFilters = [];
+  for (let b = 0; b < MEL_BANDS; b++) melFilters.push([pts[b], pts[b + 1], pts[b + 2]]);
+}
+
+/* One frame's timbre, or null if the frame is too quiet to mean anything. */
+function frameVector(){
+  analyser.getFloatFrequencyData(freqBuf);
+
+  for (let b = 0; b < MEL_BANDS; b++){
+    const f = melFilters[b], start = f[0], mid = f[1], end = f[2];
+    let sum = 0;
+    for (let i = Math.max(1, Math.floor(start)); i <= Math.min(Math.ceil(end), freqBuf.length - 1); i++){
+      const w = i <= mid ? (i - start) / (mid - start) : (end - i) / (end - mid);
+      if (w > 0) sum += w * Math.pow(10, Math.max(freqBuf[i], -100) / 10);
+    }
+    melEnergy[b] = Math.log(Math.max(sum, 1e-10));
+  }
+
+  // DCT-II. Coefficient zero is loudness, so it is never computed - which is
+  // what makes this indifferent to how close somebody stands to the microphone.
+  const v = new Float32Array(MFCC_N);
+  let norm = 0;
+  for (let k = 1; k <= MFCC_N; k++){
+    let s = 0;
+    for (let b = 0; b < MEL_BANDS; b++)
+      s += melEnergy[b] * Math.cos(Math.PI * k * (b + 0.5) / MEL_BANDS);
+    v[k - 1] = s;
+    norm += s * s;
+  }
+  norm = Math.sqrt(norm);
+  if (norm < 1e-6) return null;
+  for (let i = 0; i < MFCC_N; i++) v[i] /= norm;
+  return v;
+}
+
+function levelDb(){
+  analyser.getFloatTimeDomainData(timeBuf);
+  let s = 0;
+  for (let i = 0; i < timeBuf.length; i++) s += timeBuf[i] * timeBuf[i];
+  return 20 * Math.log10(Math.max(Math.sqrt(s / timeBuf.length), 1e-9));
+}
+
+/* Same detector as index.html, including the octave correction - a periodic
+   signal correlates just as well at twice its period, and without this a child
+   reads as an adult. */
+function pitchHz(){
+  const n = pitchBuf.length;
+  for (let i = 0; i < n; i++){
+    let s = 0;
+    for (let k = 0; k < 4; k++) s += timeBuf[i * 4 + k];
+    pitchBuf[i] = s / 4;
+  }
+  const sr = rate / 4;
+  let energy = 0;
+  for (let i = 0; i < n; i++) energy += pitchBuf[i] * pitchBuf[i];
+  if (energy / n < 1e-8) return 0;
+
+  const minLag = Math.floor(sr / VOICED_MAX_HZ);
+  const maxLag = Math.min(Math.floor(sr / VOICED_MIN_HZ), n - 1);
+  if (!ncBuf || ncBuf.length < maxLag + 1) ncBuf = new Float32Array(maxLag + 1);
+  for (let lag = minLag; lag <= maxLag; lag++){
+    let num = 0, e1 = 0, e2 = 0;
+    for (let i = 0; i + lag < n; i++){
+      const a = pitchBuf[i], b = pitchBuf[i + lag];
+      num += a * b; e1 += a * a; e2 += b * b;
+    }
+    const den = Math.sqrt(e1 * e2);
+    ncBuf[lag] = den > 0 ? num / den : 0;
+  }
+  let best = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) if (ncBuf[lag] > best) best = ncBuf[lag];
+  if (best < 0.4) return 0;
+  for (let lag = minLag; lag <= maxLag; lag++)
+    if (ncBuf[lag] >= best * 0.9) return sr / lag;
+  return 0;
+}
+
+/* ---------- collecting an utterance ---------- */
+
+function newTake(){ return { vecs: [], pitches: [] }; }
+
+function collectFrame(take){
+  const db = levelDb();
+  if (db < ACTIVE_DB) return false;
+  const f0 = pitchHz();
+  if (!f0) return false;                 // only voiced frames carry a voice
+  const v = frameVector();
+  if (!v) return false;
+  take.vecs.push(v);
+  take.pitches.push(f0);
+  return true;
+}
+
+/* Average the frames, then renormalise - the mean of unit vectors is not one. */
+function finishTake(take){
+  if (take.vecs.length < 12) return null;      // too little voiced audio to trust
+  const c = new Float32Array(MFCC_N);
+  for (const v of take.vecs) for (let b = 0; b < MFCC_N; b++) c[b] += v[b];
+  let norm = 0;
+  for (let b = 0; b < MFCC_N; b++){ c[b] /= take.vecs.length; norm += c[b] * c[b]; }
+  norm = Math.sqrt(norm);
+  for (let b = 0; b < MFCC_N; b++) c[b] /= norm;
+  const p = take.pitches.slice().sort((a, b) => a - b);
+  return { v: Array.from(c, x => +x.toFixed(4)),
+           f0: +p[p.length >> 1].toFixed(1),
+           frames: take.vecs.length };
+}
+
+const cosine = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+
+/* ---------- the roster ---------- */
+
+const KEY = 'jarvisVoiceTest';
+let roster = [];      // [{ name, jarvis:bool, takes:[{v,f0,frames}] }]
+
+function load(){ try { roster = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch(e){ roster = []; } }
+function save(){ try { localStorage.setItem(KEY, JSON.stringify(roster)); } catch(e){} }
+
+function entryFor(name, isJarvis){
+  let e = roster.find(r => r.name.toLowerCase() === name.toLowerCase());
+  if (!e){ e = { name, jarvis: !!isJarvis, takes: [] }; roster.push(e); }
+  return e;
+}
+
+/* Best similarity against any single take, not against an averaged centroid.
+   Averaging takes from different sessions blurs them together; the nearest one
+   is what actually matters. */
+function score(vec, entry){
+  let best = -1;
+  for (const t of entry.takes){ const s = cosine(vec, t.v); if (s > best) best = s; }
+  return best;
+}
+
+function identify(vec){
+  const scored = roster.map(e => ({ name: e.name, jarvis: e.jarvis, s: score(vec, e) }))
+                       .sort((a, b) => b.s - a.s);
+  return scored;
+}
+
+/* ---------- rendering ---------- */
+
+function renderList(){
+  const el = $('#list');
+  if (!roster.length){ el.innerHTML = '<div class="note">Nobody yet.</div>'; return; }
+  el.innerHTML = '';
+  roster.forEach((e, i) => {
+    const row = document.createElement('div');
+    row.className = 'voice' + (e.jarvis ? ' jarvis' : '');
+    const pitches = e.takes.map(t => t.f0);
+    const med = pitches.length ? Math.round(pitches.reduce((a, b) => a + b, 0) / pitches.length) : 0;
+    row.innerHTML = '<div><b>' + e.name + '</b>' +
+      (e.jarvis ? ' <span class="meta">(the helmet, captured without cancellation)</span>' : '') +
+      '<div class="meta">' + e.takes.length + ' take' + (e.takes.length === 1 ? '' : 's') +
+      ' · about ' + med + ' Hz</div></div>';
+    const del = document.createElement('button');
+    del.className = 'ghost'; del.textContent = 'Remove';
+    del.onclick = () => { roster.splice(i, 1); save(); renderList(); renderMatrix(); };
+    row.appendChild(del);
+    el.appendChild(row);
+  });
+}
+
+function renderMatrix(){
+  const el = $('#matrix'), vEl = $('#verdict');
+  const usable = roster.filter(e => e.takes.length);
+  if (usable.length < 2){
+    el.innerHTML = '<div class="note">Enrol at least two voices.</div>';
+    vEl.textContent = ''; return;
+  }
+  let html = '<table><tr><th></th>';
+  usable.forEach(e => html += '<th>' + e.name + '</th>');
+  html += '</tr>';
+
+  // The diagonal is the number everything else is judged against: how alike two
+  // takes of the SAME person are. A cross-pair score only means something
+  // relative to it - 0.86 between two people is fine if the same person scores
+  // 0.98, and meaningless if they score 0.69.
+  let worstSelf = null, bestCross = null;
+
+  usable.forEach(a => {
+    html += '<tr><th class="rowh">' + a.name + '</th>';
+    usable.forEach(b => {
+      if (a === b){
+        if (a.takes.length < 2){ html += '<td class="self">one take</td>'; return; }
+        let lo = 2;
+        for (let i = 0; i < a.takes.length; i++)
+          for (let j = i + 1; j < a.takes.length; j++)
+            lo = Math.min(lo, cosine(a.takes[i].v, a.takes[j].v));
+        if (!worstSelf || lo < worstSelf.s) worstSelf = { s: lo, name: a.name };
+        html += '<td class="self">' + lo.toFixed(3) + '</td>';
+        return;
+      }
+      // Every take against every take; the highest is the confusion risk.
+      let best = -1;
+      for (const ta of a.takes) for (const tb of b.takes){
+        const s = cosine(ta.v, tb.v); if (s > best) best = s;
+      }
+      const cls = best > 0.9 ? 'hi' : best > 0.75 ? 'mid' : 'lo';
+      html += '<td class="' + cls + '">' + best.toFixed(3) + '</td>';
+      if (!bestCross || best > bestCross.s)
+        bestCross = { s: best, pair: a.name + ' / ' + b.name, jarvis: a.jarvis || b.jarvis };
+    });
+    html += '</tr>';
+  });
+  html += '</table>';
+  el.innerHTML = html;
+
+  vEl.innerHTML = renderVerdict(usable, worstSelf, bestCross);
+}
+
+/* Leave-one-out, because comparing the worst pair of takes to the best pair of
+   takes answers a question nobody asks. The roster never compares two takes; it
+   compares a NEW utterance against the best-matching take of each person. So
+   score each take that way - hold it out, rank it against everyone including
+   its own speaker's remaining takes, and see whether the right name wins.
+   Varied takes lower the raw matrix while improving this, which is why the
+   matrix said no while the live panel was getting every answer right. */
+function leaveOneOut(usable){
+  const out = [];
+  for (const p of usable){
+    if (p.takes.length < 2) continue;
+    for (let i = 0; i < p.takes.length; i++){
+      const held = p.takes[i];
+      const ranked = usable.map(q => {
+        const pool = q === p ? p.takes.filter((_, j) => j !== i) : q.takes;
+        let best = -1;
+        for (const t of pool){ const s = cosine(held.v, t.v); if (s > best) best = s; }
+        return { name: q.name, s: best };
+      }).filter(x => x.s > -1).sort((a, b) => b.s - a.s);
+      if (ranked.length < 2) continue;
+      out.push({ truth: p.name, got: ranked[0].name,
+                 margin: ranked[0].s - ranked[1].s, runnerUp: ranked[1].name });
+    }
+  }
+  return out;
+}
+
+function renderVerdict(usable, worstSelf, bestCross){
+  const loo = leaveOneOut(usable);
+  if (!loo.length)
+    return '<span style="color:var(--amber)">Record at least two takes for two different ' +
+           'people — there is nothing to cross-validate yet.</span>';
+
+  const right = loo.filter(r => r.truth === r.got);
+  const wrong = loo.filter(r => r.truth !== r.got);
+  const minMargin = right.length ? Math.min(...right.map(r => r.margin)) : 0;
+
+  let head = '<b>' + right.length + ' of ' + loo.length + '</b> held-out takes identified ' +
+    'correctly, tightest margin <b>' + minMargin.toFixed(3) + '</b>. ';
+  if (wrong.length)
+    head += 'Confused: ' + wrong.map(r => r.truth + ' heard as ' + r.got).join(', ') + '. ';
+  if (bestCross && worstSelf)
+    head += '<span class="note">(Raw matrix, for reference: closest different pair ' +
+            bestCross.s.toFixed(3) + ', least alike same-person pair ' + worstSelf.s.toFixed(3) +
+            ' — the second number is pessimistic by construction and is not the decision.)</span> ';
+
+  if (!wrong.length && minMargin > 0.04)
+    return '<span style="color:var(--green)">' + head + 'That is enough. The fingerprint carries ' +
+      'the roster — nearest match, with the margin as the confidence.</span>';
+  if (!wrong.length)
+    return '<span style="color:var(--amber)">' + head + 'Right every time but tight. Usable if an ' +
+      'unconfident answer counts as unknown rather than a guess. More takes would widen it.</span>';
+  return '<span style="color:var(--crimson)">' + head + 'Mistaking one person for another is the ' +
+    'failure that matters. Add takes for whoever was confused; if it persists the fingerprint is ' +
+    'not enough and the roster needs a real embedding model.</span>';
+}
+
+/* ---------- recording ---------- */
+
+let stream = null;
+
+async function mic(){
+  if (stream) return true;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation:true, noiseSuppression:false, autoGainControl:false } });
+    setupAnalyser(stream);
+    $('#liveBtn').disabled = false;
+    return true;
+  } catch(e){ $('#stage').textContent = 'Microphone refused: ' + e.message; return false; }
+}
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function recordInto(name, isJarvis, ms, speakThis){
+  if (!await mic()) return;
+  const take = newTake();
+  let running = true, kept = 0;
+
+  const spoken = speakThis ? speakLine(speakThis) : null;
+  (function poll(){
+    if (!running) return;
+    if (collectFrame(take)) kept++;
+    $('#stage').textContent = (speakThis ? 'Listening to JARVIS… ' : 'Recording… ') +
+      kept + ' voiced frames';
+    requestAnimationFrame(poll);
+  })();
+
+  await (spoken || sleep(ms));
+  running = false;
+
+  const t = finishTake(take);
+  if (!t){
+    $('#stage').textContent = 'Not enough voiced audio — talk continuously and a bit louder.';
+    log('take for "' + name + '" rejected: only ' + take.vecs.length + ' voiced frames');
+    return;
+  }
+  entryFor(name, isJarvis).takes.push(t);
+  save(); renderList(); renderMatrix();
+  $('#stage').textContent = 'Captured ' + name + ' — ' + t.frames + ' frames, about ' + Math.round(t.f0) + ' Hz.';
+  log('enrolled "' + name + '": ' + t.frames + ' frames, ' + t.f0.toFixed(0) + ' Hz');
+}
+
+/* Capturing JARVIS needs the echo canceller switched OFF, which is not a
+   workaround but the finding itself.
+
+   With cancellation on, three attempts collected zero voiced frames. That is
+   not a bug: the canceller removes him to below the activity floor, and what
+   little residue survives is non-periodic, so the pitch detector correctly
+   refuses to call it a voice. He is not merely quiet on that stream, he is not
+   recognisably a voice on it at all.
+
+   So the interesting question is no longer "can we tell JARVIS from a person" -
+   on the cancelled stream there is no JARVIS to tell apart. It is "if he ever
+   leaks through, as he did before the pitch gate went in, would he be mistaken
+   for someone?" That needs his voice measured raw, which is the worst case. */
+async function withRawStream(fn){
+  const raw = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation:false, noiseSuppression:false, autoGainControl:false } });
+  const savedA = analyser, savedF = freqBuf, savedT = timeBuf;
+  const c = new (window.AudioContext || window.webkitAudioContext)();
+  try {
+    const a = c.createAnalyser();
+    a.fftSize = 2048; a.smoothingTimeConstant = 0;
+    c.createMediaStreamSource(raw).connect(a);
+    analyser = a;
+    freqBuf = new Float32Array(a.frequencyBinCount);
+    timeBuf = new Float32Array(a.fftSize);
+    await fn();
+  } finally {
+    analyser = savedA; freqBuf = savedF; timeBuf = savedT;
+    raw.getTracks().forEach(t => t.stop());
+    c.close();
+  }
+}
+
+/* The app's own voice settings, so this measures the voice the helmet uses. */
+const MALE_VOICE = /\b(ryan|thomas|george|oliver|alan|daniel|arthur|male)\b/i;
+function pickVoice(){
+  const voices = speechSynthesis.getVoices();
+  const gb = voices.filter(v => /en[-_]GB/i.test(v.lang));
+  const male = gb.filter(v => MALE_VOICE.test(v.name));
+  return male.find(v => /natural/i.test(v.name)) || male[0] ||
+         gb[0] || voices.find(v => /^en/i.test(v.lang)) || voices[0];
+}
+function speakLine(text){
+  return new Promise(resolve => {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v){ u.voice = v; u.lang = v.lang; log('JARVIS voice: ' + v.name); }
+    u.rate = 0.96; u.pitch = 0.85;
+    let done = false;
+    const fin = () => { if (!done){ done = true; resolve(); } };
+    u.onend = u.onerror = fin;
+    setTimeout(fin, 20000);
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+
+$('#rec').onclick = async () => {
+  const name = $('#name').value.trim();
+  if (!name){ $('#stage').textContent = 'Give the voice a name first.'; return; }
+  $('#rec').disabled = $('#recJarvis').disabled = true;
+  await recordInto(name, false, 5000, null);
+  $('#rec').disabled = $('#recJarvis').disabled = false;
+};
+
+$('#recJarvis').onclick = async () => {
+  $('#rec').disabled = $('#recJarvis').disabled = true;
+  if (!await mic()){ $('#rec').disabled = $('#recJarvis').disabled = false; return; }
+  try {
+    await withRawStream(() => recordInto('JARVIS', true, 0,
+      'Systems check. Power core nominal, repulsors charged and holding. ' +
+      'All systems green, sir, you are cleared for flight. ' +
+      'Seasons are caused by the tilt of the Earth, never by how close we are to the Sun.'));
+  } catch(e){
+    $('#stage').textContent = 'Could not open a second microphone: ' + e.message;
+  }
+  $('#rec').disabled = $('#recJarvis').disabled = false;
+};
+
+/* ---------- live identification ---------- */
+
+let liveOn = false, liveTake = null, silentFrames = 0;
+
+$('#liveBtn').onclick = async () => {
+  if (!await mic()) return;
+  liveOn = !liveOn;
+  $('#liveBtn').textContent = liveOn ? 'Stop listening' : 'Start listening';
+  if (liveOn) requestAnimationFrame(liveTick);
+};
+
+function liveTick(){
+  if (!liveOn) return;
+  requestAnimationFrame(liveTick);
+
+  const db = levelDb();
+  $('#level').textContent = db.toFixed(1) + ' dB';
+
+  if (!liveTake) liveTake = newTake();
+  const got = collectFrame(liveTake);
+  if (got){
+    silentFrames = 0;
+    $('#pitch').textContent = Math.round(liveTake.pitches[liveTake.pitches.length - 1]) + ' Hz';
+    return;
+  }
+
+  // A phrase ends when the voice stops for a moment. Judge it then, on the
+  // whole phrase, rather than on single frames - one frame is far too little.
+  silentFrames++;
+  if (silentFrames < 18 || !liveTake.vecs.length) return;
+
+  const t = finishTake(liveTake);
+  liveTake = null; silentFrames = 0;
+  if (!t) return;
+
+  const ranked = identify(t.v);
+  if (!ranked.length){ $('#who').textContent = 'nobody enrolled'; return; }
+
+  const top = ranked[0], second = ranked[1];
+  $('#who').textContent = top.name + (top.jarvis ? ' (the helmet)' : '');
+  $('#who').style.color = top.jarvis ? 'var(--crimson)' : 'var(--cyan)';
+  $('#score').textContent = top.s.toFixed(3);
+  $('#second').textContent = second ? second.name + ' ' + second.s.toFixed(3) : '—';
+  const margin = second ? (top.s - second.s) : 1;
+  log('heard ' + t.frames + ' frames at ' + t.f0.toFixed(0) + ' Hz -> ' + top.name +
+      ' ' + top.s.toFixed(3) + (second ? ' (over ' + second.name + ' ' + second.s.toFixed(3) +
+      ', margin ' + margin.toFixed(3) + ')' : ''));
+}
+
+load(); renderList(); renderMatrix();
+if (speechSynthesis.getVoices().length === 0) speechSynthesis.onvoiceschanged = () => {};
+</script>
+</body>
+</html>

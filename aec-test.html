@@ -1,0 +1,749 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>JARVIS — echo cancellation test</title>
+<!--
+  Phase 0, step 1. Answers two questions before any change is made to index.html:
+
+    1. Does this Chrome have the APIs the plan depends on?
+       - MediaStreamTrack as input to SpeechRecognition  (Chrome 135+, desktop)
+       - on-device speech recognition                    (Chrome 139+, desktop)
+
+    2. Does Chrome's echo canceller have a reference signal for speechSynthesis?
+
+  Question 2 is the one that decides the architecture. On Windows, speechSynthesis
+  renders through the OS SAPI voice, which may sit outside Chrome's own audio
+  render path - and if it does, the echo canceller has nothing to subtract and
+  JARVIS keeps hearing himself no matter what constraints we ask for.
+
+  The test opens two microphone streams that differ in exactly one constraint,
+  plays two different sound sources through the speakers, and measures how much
+  quieter the cancelled stream is than the raw one (ERLE, in dB).
+
+  The Web Audio condition is the positive control. Web Audio definitely goes
+  through Chrome's render path, so if AEC cancels that but not speechSynthesis,
+  the answer is unambiguous: move TTS into the page.
+
+  Serve it, don't open the file directly - getUserMedia needs a secure context:
+      .\start_the_server.bat   then  http://localhost:8000/aec-test.html
+-->
+<style>
+:root{
+  --void:#03080f;
+  --plate:#0a1420;
+  --plate-2:#0d1a29;
+  --line:#1a2836;
+  --cyan:#5fd3f3;
+  --cyan-hot:#c4f1ff;
+  --amber:#f0a92e;
+  --crimson:#e33b32;
+  --green:#4fd18b;
+  --ink:#a4c2d6;
+  --ink-strong:#dcecf6;
+  --ink-dim:#5a7488;
+  --mono:ui-monospace,"SF Mono","Roboto Mono","DejaVu Sans Mono",monospace;
+  --display:"Arial Narrow","Roboto Condensed","Helvetica Neue Condensed",system-ui,sans-serif;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{
+  background:var(--void);color:var(--ink);
+  font-family:var(--mono);font-size:14px;line-height:1.6;
+  padding:2rem 1.25rem 5rem;
+}
+.wrap{max-width:860px;margin:0 auto}
+
+h1{font-family:var(--display);font-size:2rem;letter-spacing:.18em;text-transform:uppercase;
+   color:var(--cyan);font-weight:600;margin-bottom:.35rem}
+.sub{color:var(--ink-dim);font-size:.82rem;margin-bottom:2.25rem;letter-spacing:.04em}
+
+h2{font-family:var(--display);font-size:.78rem;letter-spacing:.28em;text-transform:uppercase;
+   color:var(--ink-dim);font-weight:600;margin:2.5rem 0 .9rem;
+   padding-bottom:.5rem;border-bottom:1px solid var(--line)}
+
+.card{background:var(--plate);border:1px solid var(--line);border-radius:3px;
+      padding:1.1rem 1.25rem;margin-bottom:1rem}
+
+/* capability rows */
+.row{display:flex;justify-content:space-between;align-items:baseline;gap:1rem;
+     padding:.45rem 0;border-bottom:1px solid rgba(26,40,54,.55)}
+.row:last-child{border-bottom:none}
+.row .k{color:var(--ink)}
+.row .v{font-size:.82rem;text-align:right;white-space:nowrap}
+.ok{color:var(--green)}
+.no{color:var(--crimson)}
+.warn{color:var(--amber)}
+.dim{color:var(--ink-dim)}
+
+/* instructions */
+ol.steps{margin:0 0 0 1.1rem}
+ol.steps li{margin-bottom:.5rem}
+ol.steps b{color:var(--cyan-hot);font-weight:600}
+
+button{
+  background:transparent;border:1px solid var(--cyan);color:var(--cyan);
+  font-family:var(--mono);font-size:.78rem;letter-spacing:.18em;text-transform:uppercase;
+  padding:.9rem 2rem;border-radius:2px;cursor:pointer;margin-top:1.25rem;
+}
+button:hover:not(:disabled){background:rgba(95,211,243,.09)}
+button:active:not(:disabled){background:var(--cyan);color:var(--void)}
+button:disabled{border-color:var(--line);color:var(--ink-dim);cursor:not-allowed}
+button:focus-visible{outline:2px solid var(--cyan-hot);outline-offset:2px}
+
+#stage{color:var(--cyan-hot);font-size:.85rem;margin-top:1rem;min-height:1.4em;letter-spacing:.06em}
+
+/* meters */
+.cond{margin-bottom:1.4rem}
+.cond:last-child{margin-bottom:0}
+.cond-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:.5rem}
+.cond-name{color:var(--ink-strong);font-size:.9rem}
+.cond-role{color:var(--ink-dim);font-size:.72rem;letter-spacing:.1em;text-transform:uppercase}
+.bars{display:grid;grid-template-columns:5.5rem 1fr 4.5rem;gap:.6rem;align-items:center;
+      font-size:.75rem;margin-bottom:.3rem}
+.bars .lbl{color:var(--ink-dim)}
+.track{height:9px;background:var(--plate-2);border:1px solid var(--line);border-radius:1px;
+       overflow:hidden}
+.fill{height:100%;width:0;transition:width .25s linear}
+.fill.raw{background:var(--crimson)}
+.fill.aec{background:var(--cyan)}
+.bars .num{text-align:right;font-variant-numeric:tabular-nums;color:var(--ink)}
+.erle{margin-top:.55rem;font-size:.82rem;letter-spacing:.05em}
+
+/* verdict */
+#verdict{display:none;border-left-width:3px;border-left-style:solid}
+#verdict h3{font-family:var(--display);font-size:1.15rem;letter-spacing:.06em;
+            margin-bottom:.6rem;font-weight:600}
+#verdict p{margin-bottom:.7rem;font-size:.88rem;line-height:1.7}
+#verdict p:last-child{margin-bottom:0}
+#verdict code{background:var(--plate-2);padding:.05em .3em;border-radius:2px;color:var(--cyan-hot)}
+
+.note{font-size:.78rem;color:var(--ink-dim);line-height:1.7;margin-top:.8rem}
+#log{font-size:.72rem;color:var(--ink-dim);white-space:pre-wrap;margin-top:1rem;
+     max-height:190px;overflow-y:auto;line-height:1.55}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Echo test</h1>
+  <div class="sub">JARVIS Phase 0 · does Chrome's echo canceller hear speechSynthesis?</div>
+
+  <h2>This browser</h2>
+  <div class="card" id="caps"><div class="dim">checking…</div></div>
+
+  <h2>Before you run it</h2>
+  <div class="card">
+    <ol class="steps">
+      <li><b>Laptop speakers on, at a normal listening volume.</b> Not headphones — the
+        whole point is letting the microphone hear the speakers.</li>
+      <li><b>Quiet room.</b> Nobody talking, no music. It takes about 20 seconds.</li>
+      <li><b>Allow the microphone</b> when Chrome asks.</li>
+      <li>Then don't touch anything until it finishes. It will speak once, then play a
+        burst of speech-like noise.</li>
+    </ol>
+    <button id="run">Run the test</button>
+    <div id="stage"></div>
+  </div>
+
+  <h2>Measurements</h2>
+  <div class="card" id="results">
+    <div class="cond" id="c-base">
+      <div class="cond-head">
+        <span class="cond-name">1 · Silence</span>
+        <span class="cond-role">noise floor</span>
+      </div>
+      <div class="bars"><span class="lbl">raw</span><span class="track"><span class="fill raw"></span></span><span class="num">—</span></div>
+      <div class="bars"><span class="lbl">cancelled</span><span class="track"><span class="fill aec"></span></span><span class="num">—</span></div>
+    </div>
+
+    <div class="cond" id="c-tts">
+      <div class="cond-head">
+        <span class="cond-name">2 · speechSynthesis</span>
+        <span class="cond-role">the question</span>
+      </div>
+      <div class="bars"><span class="lbl">raw</span><span class="track"><span class="fill raw"></span></span><span class="num">—</span></div>
+      <div class="bars"><span class="lbl">cancelled</span><span class="track"><span class="fill aec"></span></span><span class="num">—</span></div>
+      <div class="erle dim">ERLE —</div>
+    </div>
+
+    <div class="cond" id="c-wa">
+      <div class="cond-head">
+        <span class="cond-name">3 · Web Audio</span>
+        <span class="cond-role">positive control</span>
+      </div>
+      <div class="bars"><span class="lbl">raw</span><span class="track"><span class="fill raw"></span></span><span class="num">—</span></div>
+      <div class="bars"><span class="lbl">cancelled</span><span class="track"><span class="fill aec"></span></span><span class="num">—</span></div>
+      <div class="erle dim">ERLE —</div>
+    </div>
+  </div>
+
+  <div class="card" id="verdict"></div>
+
+  <h2>Double-talk</h2>
+  <div class="card">
+    <p class="note" style="margin-top:0">
+      The test above measured JARVIS talking <em>alone</em>. Barge-in is the other case —
+      <b style="color:var(--cyan-hot)">you talking while he talks</b>. Cancellers often suppress the
+      whole channel during far-end speech rather than subtracting only the echo, and that would
+      take the child's voice with it. This measures whether it does.
+    </p>
+    <p class="note">
+      <b style="color:var(--cyan-hot)">Talk continuously over him for the whole utterance</b> —
+      count out loud, read this paragraph, anything. Normal speaking volume, speakers on as before.
+    </p>
+    <button id="runDt" disabled>Run the double-talk test</button>
+    <div id="stageDt"></div>
+
+    <div class="cond" id="c-dt" style="margin-top:1.5rem">
+      <div class="cond-head">
+        <span class="cond-name">4 · You, over JARVIS</span>
+        <span class="cond-role">the barge-in case</span>
+      </div>
+      <div class="bars"><span class="lbl">raw</span><span class="track"><span class="fill raw"></span></span><span class="num">—</span></div>
+      <div class="bars"><span class="lbl">cancelled</span><span class="track"><span class="fill aec"></span></span><span class="num">—</span></div>
+      <div class="erle dim">ERLE —</div>
+    </div>
+    <div id="dtVerdict" class="note"></div>
+  </div>
+
+  <h2>Log</h2>
+  <div class="card"><div id="log">—</div></div>
+
+  <p class="note">
+    ERLE is echo return loss enhancement: how much quieter the cancelled stream is than the raw
+    one, in decibels. Above 10 dB the canceller is doing real work on that source. Below 3 dB it
+    is not touching it. The Web Audio row is the control — Web Audio certainly goes through
+    Chrome's render path, so if it cancels and speechSynthesis does not, the difference is the
+    answer.
+  </p>
+
+</div>
+
+<script>
+"use strict";
+
+const $ = s => document.querySelector(s);
+const logEl = $('#log');
+let logLines = [];
+function log(msg){
+  logLines.push(msg);
+  logEl.textContent = logLines.join('\n');
+  logEl.scrollTop = logEl.scrollHeight;
+  console.log('[aec-test] ' + msg);
+}
+
+/* ---------- capability report ---------- */
+
+const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+
+function chromeVersion(){
+  const m = navigator.userAgent.match(/Chrome\/(\d+)/);
+  return m ? parseInt(m[1], 10) : null;
+}
+
+function capRow(k, value, cls, hint){
+  return '<div class="row"><span class="k">' + k + '</span>' +
+         '<span class="v ' + (cls || 'dim') + '">' + value +
+         (hint ? ' <span class="dim">' + hint + '</span>' : '') + '</span></div>';
+}
+
+function renderCaps(extra){
+  const v = chromeVersion();
+  let html = '';
+
+  html += capRow('Chrome version', v === null ? 'not Chrome' : v,
+    v === null ? 'no' : (v >= 139 ? 'ok' : (v >= 135 ? 'warn' : 'no')),
+    v === null ? '' : (v >= 139 ? '' : (v >= 135 ? 'on-device needs 139' : 'needs 135 minimum')));
+
+  html += capRow('Secure context', window.isSecureContext ? 'yes' : 'no',
+    window.isSecureContext ? 'ok' : 'no',
+    window.isSecureContext ? '' : 'serve over localhost or https');
+
+  html += capRow('SpeechRecognition', SR ? 'present' : 'missing', SR ? 'ok' : 'no');
+
+  // The on-device API was renamed while it was being standardised -
+  // availableOnDevice() in the original explainer, available() in later Chrome.
+  // Checking only the old name reports a false negative on a browser that has
+  // the feature under the new one.
+  const odName = !SR ? null
+    : ['availableOnDevice', 'available'].find(n => typeof SR[n] === 'function') || null;
+  html += capRow('On-device recognition',
+    odName ? 'SpeechRecognition.' + odName + '()' : 'not available',
+    odName ? 'ok' : 'warn', odName ? '' : 'cloud recognition only');
+
+  const supported = navigator.mediaDevices && navigator.mediaDevices.getSupportedConstraints
+    ? navigator.mediaDevices.getSupportedConstraints() : {};
+  html += capRow('echoCancellation constraint', supported.echoCancellation ? 'supported' : 'not supported',
+    supported.echoCancellation ? 'ok' : 'no');
+
+  html += (extra || '');
+  $('#caps').innerHTML = html;
+
+  // Dump whatever is actually on the constructor, so a third spelling shows up
+  // as a name we can read rather than as a silent "not available".
+  if (SR){
+    const statics = Object.getOwnPropertyNames(SR)
+      .filter(n => n !== 'length' && n !== 'name' && n !== 'prototype');
+    log('SpeechRecognition statics: ' + (statics.length ? statics.join(', ') : '(none)'));
+  }
+  if (odName){
+    Promise.resolve()
+      .then(() => SR[odName]({ langs:['en-GB'], processLocally:true }))
+      .catch(() => SR[odName]('en-GB'))
+      .then(r => log('on-device en-GB: ' + JSON.stringify(r)))
+      .catch(e => log('on-device probe failed: ' + e.name + ' — ' + e.message));
+  }
+}
+renderCaps();
+
+/* ---------- measurement ---------- */
+
+/* One analyser per stream. Accumulates mean square over a window so we can take
+   an RMS at the end of each condition rather than sampling one instant. */
+function makeMeter(ctx, stream){
+  const src = ctx.createMediaStreamSource(stream);
+  const an = ctx.createAnalyser();
+  an.fftSize = 2048;
+  src.connect(an);
+  // Deliberately NOT connected to ctx.destination - routing the mic back to the
+  // speakers is how you get a howl, and it would wreck the measurement.
+  const buf = new Float32Array(an.fftSize);
+  return {
+    analyser: an,
+    sumSq: 0,
+    n: 0,
+    reset(){ this.sumSq = 0; this.n = 0; },
+    sample(){
+      an.getFloatTimeDomainData(buf);
+      let s = 0;
+      for (let i = 0; i < buf.length; i++) s += buf[i] * buf[i];
+      this.sumSq += s / buf.length;
+      this.n++;
+      return Math.sqrt(s / buf.length);
+    },
+    rms(){ return this.n ? Math.sqrt(this.sumSq / this.n) : 0; }
+  };
+}
+
+const dB = x => 20 * Math.log10(Math.max(x, 1e-9));
+const fmtDb = x => (x >= 0 ? '+' : '') + x.toFixed(1) + ' dB';
+
+/* Map an RMS onto a 0-100 bar. -60 dB floor, 0 dB ceiling. */
+const barPct = rms => Math.max(0, Math.min(100, (dB(rms) + 60) / 60 * 100));
+
+function paint(id, rawRms, aecRms){
+  const el = $(id);
+  const rows = el.querySelectorAll('.bars');
+  rows[0].querySelector('.fill').style.width = barPct(rawRms) + '%';
+  rows[0].querySelector('.num').textContent = dB(rawRms).toFixed(1);
+  rows[1].querySelector('.fill').style.width = barPct(aecRms) + '%';
+  rows[1].querySelector('.num').textContent = dB(aecRms).toFixed(1);
+}
+
+function paintErle(id, erle, valid){
+  const el = $(id).querySelector('.erle');
+  if (!valid){
+    el.textContent = 'ERLE — (source not audible)';
+    el.className = 'erle warn';
+    return;
+  }
+  el.textContent = 'ERLE ' + fmtDb(erle) + ' — ' +
+    (erle >= 10 ? 'cancelled' : erle >= 3 ? 'partially cancelled' : 'not cancelled');
+  el.className = 'erle ' + (erle >= 10 ? 'ok' : erle >= 3 ? 'warn' : 'no');
+}
+
+/* ---------- sound sources ---------- */
+
+/* The same voice settings index.html uses, so the test measures the voice he
+   actually hears rather than the default one. */
+function pickVoice(){
+  const voices = speechSynthesis.getVoices();
+  const gb = voices.filter(v => /en[-_]GB/i.test(v.lang));
+  const male = gb.find(v => /male|daniel|arthur|george|oliver|alan/i.test(v.name));
+  return male || gb[0] || voices.find(v => /^en/i.test(v.lang)) || voices[0];
+}
+
+function speakOnce(text){
+  return new Promise(resolve => {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice();
+    if (v){ u.voice = v; u.lang = v.lang; log('voice: ' + v.name + ' (' + v.lang + ')'); }
+    u.rate = 0.96; u.pitch = 0.85; u.volume = 1;
+    let done = false;
+    const finish = () => { if (!done){ done = true; resolve(); } };
+    u.onend = u.onerror = finish;
+    setTimeout(finish, 12000);           // the app's watchdog problem, in miniature
+    speechSynthesis.cancel();
+    speechSynthesis.speak(u);
+  });
+}
+
+/* Band-limited noise with a syllable-rate envelope. A pure tone would be an
+   unfair control - echo cancellers behave differently on tones than on speech. */
+function playSpeechLikeNoise(ctx, seconds){
+  const sr = ctx.sampleRate;
+  const buf = ctx.createBuffer(1, sr * seconds, sr);
+  const d = buf.getChannelData(0);
+  for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
+
+  const src = ctx.createBufferSource();
+  src.buffer = buf;
+
+  const bp = ctx.createBiquadFilter();
+  bp.type = 'bandpass';
+  bp.frequency.value = 1200;
+  bp.Q.value = 0.55;
+
+  const g = ctx.createGain();
+  const t0 = ctx.currentTime;
+  g.gain.setValueAtTime(0.0001, t0);
+  // ~4 syllables a second
+  for (let t = 0; t < seconds; t += 0.25){
+    g.gain.exponentialRampToValueAtTime(0.35, t0 + t + 0.06);
+    g.gain.exponentialRampToValueAtTime(0.04, t0 + t + 0.22);
+  }
+  g.gain.exponentialRampToValueAtTime(0.0001, t0 + seconds);
+
+  src.connect(bp); bp.connect(g); g.connect(ctx.destination);
+  src.start();
+  return new Promise(resolve => { src.onended = resolve; setTimeout(resolve, seconds * 1000 + 400); });
+}
+
+/* ---------- the run ---------- */
+
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+async function measureDuring(meters, promise){
+  meters.forEach(m => m.reset());
+  let running = true;
+  (function poll(){
+    if (!running) return;
+    meters.forEach(m => m.sample());
+    requestAnimationFrame(poll);
+  })();
+  await promise;
+  running = false;
+  await sleep(60);
+}
+
+async function run(){
+  const btn = $('#run');
+  btn.disabled = true;
+  logLines = [];
+  $('#verdict').style.display = 'none';
+
+  let rawStream, aecStream, ctx;
+
+  try {
+    $('#stage').textContent = 'Opening two microphone streams…';
+
+    // Only echoCancellation differs. Noise suppression and AGC are off on both,
+    // so nothing else can account for a level difference between them.
+    const base = { noiseSuppression:false, autoGainControl:false };
+    aecStream = await navigator.mediaDevices.getUserMedia({
+      audio: Object.assign({ echoCancellation:true }, base) });
+    rawStream = await navigator.mediaDevices.getUserMedia({
+      audio: Object.assign({ echoCancellation:false }, base) });
+
+    const aecApplied = aecStream.getAudioTracks()[0].getSettings().echoCancellation;
+    const rawApplied = rawStream.getAudioTracks()[0].getSettings().echoCancellation;
+    log('applied echoCancellation — cancelled stream: ' + aecApplied + ', raw stream: ' + rawApplied);
+
+    let extra = capRow('Two distinct streams',
+      (aecApplied === true && rawApplied === false) ? 'yes' : 'NO',
+      (aecApplied === true && rawApplied === false) ? 'ok' : 'no',
+      (aecApplied === true && rawApplied === false) ? '' : 'Chrome ignored a constraint');
+
+    // Probe the API shape the plan depends on, with a real track in hand.
+    extra += probeTrackInput(rawStream.getAudioTracks()[0]);
+    renderCaps(extra);
+
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') await ctx.resume();
+    log('AudioContext sample rate: ' + ctx.sampleRate + ' Hz');
+
+    const mAec = makeMeter(ctx, aecStream);
+    const mRaw = makeMeter(ctx, rawStream);
+    const meters = [mAec, mRaw];
+
+    // --- 1. baseline -----------------------------------------------------
+    $('#stage').textContent = 'Measuring the noise floor — stay quiet…';
+    await sleep(400);
+    await measureDuring(meters, sleep(2200));
+    const baseRaw = mRaw.rms(), baseAec = mAec.rms();
+    paint('#c-base', baseRaw, baseAec);
+    log('baseline  raw ' + dB(baseRaw).toFixed(1) + ' dB   cancelled ' + dB(baseAec).toFixed(1) + ' dB');
+
+    await sleep(500);
+
+    // --- 2. speechSynthesis ----------------------------------------------
+    $('#stage').textContent = 'Speaking…';
+    await measureDuring(meters, speakOnce(
+      'Systems check. Power core nominal, repulsors charged and holding. ' +
+      'All systems green, sir, you are cleared for flight.'));
+    const ttsRaw = mRaw.rms(), ttsAec = mAec.rms();
+    paint('#c-tts', ttsRaw, ttsAec);
+    const ttsAudible = dB(ttsRaw) - dB(baseRaw) > 6;
+    const ttsErle = dB(ttsRaw) - dB(ttsAec);
+    paintErle('#c-tts', ttsErle, ttsAudible);
+    lastTtsErle = ttsErle;               // the baseline the double-talk run compares against
+    log('speechSynthesis  raw ' + dB(ttsRaw).toFixed(1) + ' dB   cancelled ' + dB(ttsAec).toFixed(1) +
+        ' dB   ERLE ' + ttsErle.toFixed(1) + ' dB' + (ttsAudible ? '' : '   [NOT AUDIBLE]'));
+
+    await sleep(600);
+
+    // --- 3. Web Audio control --------------------------------------------
+    $('#stage').textContent = 'Playing the control signal…';
+    await measureDuring(meters, playSpeechLikeNoise(ctx, 4));
+    const waRaw = mRaw.rms(), waAec = mAec.rms();
+    paint('#c-wa', waRaw, waAec);
+    const waAudible = dB(waRaw) - dB(baseRaw) > 6;
+    const waErle = dB(waRaw) - dB(waAec);
+    paintErle('#c-wa', waErle, waAudible);
+    log('web audio  raw ' + dB(waRaw).toFixed(1) + ' dB   cancelled ' + dB(waAec).toFixed(1) +
+        ' dB   ERLE ' + waErle.toFixed(1) + ' dB' + (waAudible ? '' : '   [NOT AUDIBLE]'));
+
+    $('#stage').textContent = 'Done.';
+    verdict({ ttsErle, waErle, ttsAudible, waAudible,
+              distinct: aecApplied === true && rawApplied === false });
+    $('#runDt').disabled = false;
+
+  } catch (e){
+    $('#stage').textContent = 'Failed: ' + e.message;
+    log('ERROR: ' + e.name + ' — ' + e.message);
+  } finally {
+    [rawStream, aecStream].forEach(s => { if (s) s.getTracks().forEach(t => t.stop()); });
+    if (ctx) ctx.close();
+    btn.disabled = false;
+  }
+}
+
+/* Does start() take a MediaStreamTrack, and in which shape? The Chromium intent
+   says it was added as an optional parameter to start(); this finds out for
+   certain rather than guessing, which is the whole reason for running it.
+
+   The trap: an older Chrome does not reject an extra argument to start(), it
+   silently ignores it and begins listening on the default microphone. Passing a
+   track and getting no exception therefore proves nothing at all. So probe with
+   a deliberately invalid argument first - only an implementation that actually
+   reads the parameter will complain about it. */
+function fresh(){
+  const r = new SR();
+  r.continuous = false;
+  r.lang = 'en-GB';
+  return r;
+}
+function tryStart(r, arg, hasArg){
+  try {
+    if (hasArg) r.start(arg); else r.start();
+    try { r.abort(); } catch(e){}
+    return null;                      // started, no complaint
+  } catch (e){
+    try { r.abort(); } catch(e2){}
+    return e;
+  }
+}
+
+function probeTrackInput(track){
+  if (!SR) return capRow('MediaStreamTrack input', 'no SpeechRecognition', 'no');
+
+  // Does start() validate its argument at all?
+  const bogus = tryStart(fresh(), 42, true);
+  if (!bogus){
+    log('start(42) was accepted — the argument is ignored, so there is no track input here');
+    return capRow('MediaStreamTrack input', 'not supported', 'no', 'argument ignored');
+  }
+  log('start(42) rejected with ' + bogus.name + ' — the argument is read');
+
+  const shapes = [
+    ['start(track)',          track],
+    ['start({audioTrack})',   { audioTrack: track }],
+    ['start({audio: track})', { audio: track }]
+  ];
+  for (const [shape, arg] of shapes){
+    const err = tryStart(fresh(), arg, true);
+    if (!err){
+      log('MediaStreamTrack input accepted as: ' + shape);
+      return capRow('MediaStreamTrack input', 'yes', 'ok', shape);
+    }
+    log('  ' + shape + ' rejected: ' + err.name + ' — ' + err.message);
+  }
+
+  // The argument is validated but none of our shapes fit - worth knowing, since
+  // it means the feature is there and only the call signature is wrong.
+  return capRow('MediaStreamTrack input', 'unknown shape', 'warn', 'see log');
+}
+
+/* ---------- verdict ---------- */
+
+function verdict(r){
+  const el = $('#verdict');
+  let colour, title, body;
+
+  if (!r.distinct){
+    colour = 'var(--amber)';
+    title = 'Test inconclusive';
+    body = '<p>Chrome did not give us two streams that differ in echo cancellation, so the ' +
+      'comparison means nothing. Close other tabs using the microphone and try again.</p>';
+  }
+  else if (!r.waAudible && !r.ttsAudible){
+    colour = 'var(--amber)';
+    title = 'The microphone never heard the speakers';
+    body = '<p>Neither source rose meaningfully above the noise floor. Almost always this is ' +
+      'headphones still plugged in, the output routed to another device, or the volume too low. ' +
+      'Fix that and run it again — a silent test looks exactly like perfect cancellation.</p>';
+  }
+  else if (r.waErle >= 10 && r.ttsErle < 3){
+    colour = 'var(--crimson)';
+    title = 'speechSynthesis is outside the canceller';
+    body =
+      '<p>The canceller removed the Web Audio signal (' + fmtDb(r.waErle) + ') and did essentially ' +
+      'nothing to the spoken one (' + fmtDb(r.ttsErle) + '). That is the definitive result: on this ' +
+      'machine <code>speechSynthesis</code> renders outside Chrome\'s audio path, so the echo ' +
+      'canceller has no reference signal for JARVIS\'s own voice.</p>' +
+      '<p><b>What follows:</b> Phase 0 should replace <code>speechSynthesis</code> with TTS rendered ' +
+      'in the page through an <code>AudioContext</code>. That puts his voice on the same path as the ' +
+      'control signal above, where the canceller demonstrably works.</p>' +
+      '<p>The voice roster still carries the barge-in decision either way — this changes how much ' +
+      'echo it has to reject, not whether it works.</p>';
+  }
+  else if (r.ttsErle >= 10){
+    colour = 'var(--green)';
+    title = 'speechSynthesis is cancelled';
+    body =
+      '<p>The canceller removed ' + fmtDb(r.ttsErle) + ' of JARVIS\'s own voice, against ' +
+      fmtDb(r.waErle) + ' for the control. It has a reference signal for SAPI output on this ' +
+      'machine.</p>' +
+      '<p><b>What follows:</b> keep <code>speechSynthesis</code>. Phase 0 is just the plumbing — ' +
+      'own the stream, pass the track to recognition — with no TTS rewrite. The roster then works ' +
+      'against a much quieter echo than expected, which is the good case.</p>';
+  }
+  else if (r.ttsErle >= 3){
+    colour = 'var(--amber)';
+    title = 'Partial cancellation';
+    body =
+      '<p>' + fmtDb(r.ttsErle) + ' on the spoken signal, ' + fmtDb(r.waErle) + ' on the control. ' +
+      'Something is being subtracted, but not enough to rely on.</p>' +
+      '<p><b>What follows:</b> build the roster first and measure how often JARVIS\'s echo is ' +
+      'still misclassified. If it holds, keep <code>speechSynthesis</code>; if it does not, moving ' +
+      'TTS into the page is the fix and this number says it would help.</p>';
+  }
+  else {
+    colour = 'var(--crimson)';
+    title = 'Nothing is being cancelled';
+    body =
+      '<p>Both sources came back near ' + fmtDb(r.ttsErle) + ' — the canceller is not engaging at ' +
+      'all, even on Web Audio. That is unusual and worth understanding before building on it: ' +
+      'check the Windows sound settings for the capture device, and whether an external mic or a ' +
+      'virtual audio device is selected.</p>' +
+      '<p>Until this is resolved, barge-in has to rest on the voice roster and the push-to-interrupt ' +
+      'key alone, with no help from echo cancellation.</p>';
+  }
+
+  el.style.display = 'block';
+  el.style.borderLeftColor = colour;
+  el.innerHTML = '<h3 style="color:' + colour + '">' + title + '</h3>' + body;
+}
+
+/* ---------- double-talk ----------
+   Single-talk ERLE tells you the echo is being removed. It does not tell you
+   whether a near-end voice survives, because the cheapest way to hit 20 dB is
+   to gate the whole channel while the far end is active - which is exactly the
+   case barge-in lives in. Comparing ERLE during double-talk against ERLE during
+   single-talk separates the two: a canceller that is genuinely subtracting an
+   echo has to back off when someone else starts speaking. */
+let lastTtsErle = null;
+
+async function runDoubleTalk(){
+  const btn = $('#runDt');
+  btn.disabled = true;
+  let rawStream, aecStream, ctx;
+
+  try {
+    const base = { noiseSuppression:false, autoGainControl:false };
+    aecStream = await navigator.mediaDevices.getUserMedia({
+      audio: Object.assign({ echoCancellation:true }, base) });
+    rawStream = await navigator.mediaDevices.getUserMedia({
+      audio: Object.assign({ echoCancellation:false }, base) });
+
+    ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (ctx.state === 'suspended') await ctx.resume();
+    const mAec = makeMeter(ctx, aecStream);
+    const mRaw = makeMeter(ctx, rawStream);
+
+    $('#stageDt').textContent = 'Get ready…';
+    await sleep(1000);
+    $('#stageDt').textContent = 'TALK NOW — keep going until he stops.';
+
+    await measureDuring([mAec, mRaw], speakOnce(
+      'Keep talking over me for the whole of this sentence, because the measurement needs ' +
+      'both of our voices in the room at the same time, and it needs them for long enough ' +
+      'to average out into something meaningful.'));
+
+    const dtRaw = mRaw.rms(), dtAec = mAec.rms();
+    paint('#c-dt', dtRaw, dtAec);
+    const dtErle = dB(dtRaw) - dB(dtAec);
+    paintErle('#c-dt', dtErle, true);
+    log('double-talk  raw ' + dB(dtRaw).toFixed(1) + ' dB   cancelled ' + dB(dtAec).toFixed(1) +
+        ' dB   ERLE ' + dtErle.toFixed(1) + ' dB');
+
+    $('#stageDt').textContent = 'Done.';
+    dtVerdict(dtErle, dB(dtRaw));
+
+  } catch (e){
+    $('#stageDt').textContent = 'Failed: ' + e.message;
+    log('ERROR (double-talk): ' + e.name + ' — ' + e.message);
+  } finally {
+    [rawStream, aecStream].forEach(s => { if (s) s.getTracks().forEach(t => t.stop()); });
+    if (ctx) ctx.close();
+    btn.disabled = false;
+  }
+}
+
+function dtVerdict(dtErle, dtRawDb){
+  const el = $('#dtVerdict');
+  const single = lastTtsErle;
+  const drop = (single === null) ? null : single - dtErle;
+  let cls, text;
+
+  if (dtRawDb < -42){
+    cls = 'warn';
+    text = 'The microphone barely heard anything — you may not have talked, or not loudly ' +
+           'enough. Run it again and speak at a normal conversational level throughout.';
+  } else if (drop === null){
+    cls = 'dim';
+    text = 'Double-talk ERLE is ' + fmtDb(dtErle) + '. Run the main test first to get something ' +
+           'to compare it against.';
+  } else if (drop >= 8){
+    cls = 'ok';
+    text = 'ERLE fell from ' + fmtDb(single) + ' alone to ' + fmtDb(dtErle) + ' with you talking — ' +
+           'a drop of ' + drop.toFixed(1) + ' dB. That is the canceller backing off when it hears ' +
+           'a second voice, which is what it should do. Your voice is surviving on the cancelled ' +
+           'stream, so recognition can run on it and still hear an interruption as it happens.';
+  } else if (drop >= 3){
+    cls = 'warn';
+    text = 'ERLE fell only ' + drop.toFixed(1) + ' dB when you spoke (' + fmtDb(single) + ' → ' +
+           fmtDb(dtErle) + '). Some of your voice is getting through, but it is being attenuated ' +
+           'along with the echo. Workable, with the roster reading the raw stream rather than the ' +
+           'cancelled one.';
+  } else {
+    cls = 'no';
+    text = 'ERLE barely moved (' + fmtDb(single) + ' → ' + fmtDb(dtErle) + '). The canceller is ' +
+           'gating the whole channel while JARVIS speaks rather than subtracting his echo, so a ' +
+           'voice talking over him is suppressed too. Recognition cannot hear an interruption on ' +
+           'the cancelled stream — barge-in has to be detected on the raw stream by the voice ' +
+           'roster instead, which is the design the plan already leans on.';
+  }
+  el.className = 'note ' + cls;
+  el.textContent = text;
+}
+
+$('#run').addEventListener('click', run);
+$('#runDt').addEventListener('click', runDoubleTalk);
+if (speechSynthesis.getVoices().length === 0){
+  speechSynthesis.onvoiceschanged = () => log('voices loaded: ' + speechSynthesis.getVoices().length);
+}
+</script>
+</body>
+</html>

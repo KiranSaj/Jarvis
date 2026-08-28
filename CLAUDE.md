@@ -82,6 +82,18 @@ removes the CORS requirement too.
 sends no server name, so Caddy had nothing to match and aborted every handshake
 with `alert internal error`. Fixed with `default_sni` in the Caddyfile.
 
+**A silent recogniser looks exactly like a quiet room.** A change that passed
+every gate left the helmet deaf for an evening: `SpeechRecognition.start(track)`
+was accepted and then returned nothing at all — no results, no errors. Neither
+`check.mjs` nor a syntax check can see that. Any change to the audio path must
+log what it decided and why *before* it is handed to anyone to test.
+
+**Test pure audio functions in Node against synthetic signals.** Two real bugs
+were caught that way and neither was visible from inside the app: an
+autocorrelation octave error that read a seven-year-old as an adult, and a
+spectral fingerprint that encoded pitch instead of timbre. Extract the function,
+feed it a sawtooth at a known frequency, assert on the answer.
+
 **Git Bash `curl` is broken on this machine** — `schannel: The Local Security
 Authority cannot be contacted`, on all HTTPS. It will mislead you. Use
 PowerShell's `Invoke-WebRequest`, or curl inside a container.
@@ -128,43 +140,94 @@ First-time LAN setup — certificates and firewall — is in `LAN-SETUP.md`.
 
 ---
 
-## Barge-in is parked — leave it off
+## Barge-in works on the laptop — and still ships off
 
-Interrupting him by voice ("Jarvis, stop") is behind the **Interrupt him** toggle
-in Settings and **ships off**. Devices that saved it on are reset once, via
-`bargeParked` in `localStorage`. Do not turn it back on by default.
+Interrupting him by voice is behind the **Interrupt him** toggle in Settings and
+**ships off**. Devices that saved it on are reset once, via `bargeParked` in
+`localStorage`. Do not turn it back on by default.
 
-It is off because the browser cannot separate his voice from the child's when
-the helmet speaker sits inches from the phone mic:
+It works now on desktop, and it needs no keyword — he interrupts by talking.
+Owning the microphone stream is what made that possible: with echo cancellation
+applied, JARVIS talking alone measures −66 dB on that stream while a person
+talking over him measures −34, because the canceller backs off the moment it
+hears a second voice. So "is somebody talking over him?" became a question about
+level rather than a guess about words. Every threshold in `index.html` carries a
+comment saying which logged session it came from — read those before changing one.
 
-- The Web Speech API hands you text and nothing else — no audio, no levels, no
-  way to apply echo cancellation.
-- `MediaStreamTrack` input to `SpeechRecognition`, which would let us feed it a
-  cleaned stream, shipped Chrome 133 on desktop only. **Android is explicitly
-  excluded**, and the helmet is Android.
+**None of it transfers to the helmet.** Both APIs it leans on are desktop-only:
+
+- `MediaStreamTrack` input to `SpeechRecognition` — **Android is explicitly
+  excluded**, and the helmet is Android. It is also `USE_TRACK_INPUT = false`
+  even on desktop: Chrome 151 accepts the track and then recognises nothing.
+- On-device recognition — desktop only, and not installed here anyway.
 - Android's echo canceller lives on the `VOICE_COMMUNICATION` capture path.
   `speechSynthesis` plays out of the media path, so on most devices there is no
-  reference signal connecting the two.
+  reference signal connecting the two — and that reference is exactly what the
+  level gate depends on.
 
-What is left is guessing from the transcript, which is what `isEcho()` and
-`echoRun()` do. That code stays in the file, unused, because the analysis in it
-is worth keeping — but it cannot be made reliable enough to point at a child.
+`isEcho()` and `echoRun()` are still in the file and still load-bearing: they are
+what stops a false interrupt dispatching his own tail back at him as a command.
 
-**Revisit it only via the input channel, not the heuristics.** A physical button
-on the helmet over BLE (the ESP32 is already there) is near-100% reliable and
-works offline; moving audio to an earbud or bone-conduction pad removes the echo
-at source and would make the existing code work as designed.
+**For the helmet, revisit via the input channel, not the heuristics.** A physical
+button over BLE (the ESP32 is already there) is near-100% reliable and works
+offline; an earbud or bone-conduction pad removes the echo at source.
 
 With the mic asleep during speech, a `speechSynthesis` `end` event that never
 fires would leave the helmet deaf until reload. `speakAwait()` has a watchdog
 that wakes the mic regardless. Do not remove it while barge-in is off.
+
+## Development workflow
+
+`HANDOFF.md` (when present) is the current state — read it first and do not
+re-derive it. `BACKLOG.md` is what is done, queued and blocked.
+`.claude/SESSION_PLAYBOOK.md` says how to start, run and end a session.
+
+**Implement inline. Do not spawn a `developer` subagent.** Measured on the
+Suvarnkar repo: sessions that delegated implementation cost 5.6M tokens per code
+mutation against 0.60M inline. Delegating to save tokens does the opposite, which
+is why there is no `developer` agent here to spawn.
+
+**The one exception** is `.claude/agents/reviewer.md`, on `opus`, for a finished
+diff that touches either the Safety rules above or the audio decision path (the
+level gate, the pitch gate, `isEcho`, `tryInterrupt`, `interruptNow`, or the
+`speaking`/`barged`/`awaitingCommand` state machine). Brief it on *what changed
+and why*, never on a checklist of what to look for — a prompt that lists the
+things to check narrows it to exactly those, and the findings worth paying for
+are the ones you did not think to ask about. It has no Edit tool: it flags, you
+fix. Resume it with `SendMessage` for a second round rather than re-spawning.
+
+### Token discipline
+
+Every tool call re-bills the whole conversation, so cost is round-trips × depth.
+
+- Batch independent reads into one message.
+- Read the range, not the file. Grep for the symbol, then read around the hit.
+- Never re-read a file already in context — the harness re-injects it after edits.
+- Prefer Edit over Write on existing files; a Write parks the whole file in
+  context permanently. `index.html` is ~1500 lines, so this matters here.
+- Keep verification narrow: `node check.mjs` prints one line, so let it.
+- Do not run `git status` + `git diff` + `git log` as an orientation ritual.
+
+### Model routing
+
+`opus` for design, the audio decision path, safety reasoning, and review.
+`sonnet` for wiring, docs, backlog updates, and applying agreed findings.
+Announce the switch out loud so the transcript records why.
 
 ## Known gaps
 
 - ESP32 firmware is not in this repo and has never been tested with the app.
 - No transcript logging — there is currently no way to review what he asked or
   what the model answered.
-- Never run on the actual phone; all testing so far is desktop Chrome.
-- `awaitingCommand` has no timeout: after a bare "Jarvis", the next thing anyone
-  says is treated as a command.
+- Never run on the actual phone; all testing so far is desktop Chrome 151.
+- Being armed for a command expires (`armForCommand`): 8 s after a bare
+  "Jarvis", `BARGE_LIVE_MS` after a barge-in, because somebody who has just
+  interrupted is addressing him and needs no wake word. Whether that barge
+  window outlasts Chrome's final for the interrupting phrase is unverified on a
+  real run — see `HANDOFF.md`.
 - `service` is a wake-word variant and false-triggers on ordinary speech.
+- The voice roster identifies but does not gate anything yet, deliberately.
+- The JARVIS pitch gate is calibrated about an octave low, because it samples
+  only the settle window at the start of an utterance.
+- Cloud speech recognition drops out regularly (`recognition error: network`).
+  The on-device model would fix it but Windows has no en-GB speech pack here.

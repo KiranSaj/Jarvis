@@ -110,6 +110,14 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
   font-family:var(--mono);font-size:.7rem;letter-spacing:.2em;text-transform:uppercase;
   padding:.9rem;border-radius:2px;cursor:pointer}
 #panel button.ghost{border-color:#1e2733;color:var(--ink-dim)}
+#panel .vrow{display:flex;justify-content:space-between;align-items:center;gap:.6rem;
+  padding:.4rem 0;border-bottom:1px solid #141f2c;font-size:.78rem}
+#panel .vrow:last-child{border-bottom:none}
+#panel .vrow b{color:var(--ink);font-weight:600}
+#panel .vrow em{color:var(--ink-dim);font-size:.66rem;font-style:normal}
+#panel .vrow button{flex:none;padding:.3rem .6rem;font-size:.58rem}
+#panel .vadd{display:flex;gap:.5rem;margin-top:.5rem}
+#panel .vadd button{flex:none;width:auto;padding:.6rem 1rem;font-size:.6rem}
 #panel button:active{background:var(--cyan);color:var(--void)}
 
 @media (prefers-reduced-motion:reduce){
@@ -178,8 +186,17 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
   <div class="row"><label for="pBarge">Interrupt him</label>
     <select id="pBarge">
       <option value="off">Off — mic sleeps while he talks</option>
-      <option value="on">On — experimental, he may hear himself</option>
+      <option value="on">On — just talk over him, no keyword needed</option>
     </select></div>
+  <div class="row"><label>Voices he knows</label>
+    <div id="pVoices"></div>
+    <div class="vadd">
+      <input id="pVoiceName" placeholder="name" autocomplete="off">
+      <button class="ghost" id="pVoiceRec">Record 5s</button>
+    </div>
+    <p class="note" id="pVoiceStage">Three takes each, saying something different every time.
+    He does not act on this yet — he listens to everyone and only reports who he thinks it was.</p>
+  </div>
   <p class="note">The key is stored on this phone only. Set a monthly spend cap in your provider's
   dashboard. For Ollama, start it with OLLAMA_ORIGINS=* so the browser is allowed to reach it.</p>
   <div class="btns">
@@ -278,9 +295,19 @@ async function boot(){
     await sleep(260);
   };
 
-  let micOK = false;
-  try { await navigator.mediaDevices.getUserMedia({audio:true}); micOK = true; } catch(e){}
+  // Acquires the stream and keeps it - see acquireMic. This used to open a
+  // stream purely to see whether it could, and drop it on the floor.
+  const micOK = await acquireMic();
   await log('AUDIO INPUT', micOK ? 'ONLINE' : 'DENIED', !micOK);
+
+  await log('RECOGNITION', await prepareOnDevice(), false);
+
+  // The level meter is what barge-in listens to. It reads our own stream, so it
+  // works whether or not SpeechRecognition accepted the track.
+  if (micOK) startMeter();
+  loadRoster();
+  if (roster.length)
+    console.log('[JARVIS] roster: ' + roster.map(p => p.name + ' (' + p.takes.length + ')').join(', '));
 
   await loadVoices();
   await log('VOICE SYNTHESIS', 'ONLINE');
@@ -326,6 +353,155 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible'){ requestWakeLock(); if (wantListening) startListening(); }
 });
 
+/* ---------- the microphone ----------
+   The app opens the stream itself rather than letting SpeechRecognition open one
+   privately inside Chrome. A stream we hold is a stream we can echo-cancel, and
+   later measure - which is what everything else depends on.
+
+   Measured on the laptop with aec-test.html, and the numbers are why this is
+   worth doing:
+
+     JARVIS speaking alone   32.8 dB of his own voice removed
+     someone talking over him 5.0 dB - the canceller backing off for the near-end
+
+   That 27.8 dB collapse is the useful part. It means his voice all but vanishes
+   from this stream while a real person's does not, so "is someone talking over
+   him?" stops being a guess about words and becomes a question about level.
+
+   Not on Android: start(track) is desktop-only, which is why the helmet still
+   needs the button. Everything below degrades to the old behaviour if anything
+   is missing - Chrome opens its own microphone and the app works as it did. */
+
+/* Handing our track to SpeechRecognition is OFF.
+
+   Chrome 151 accepts start(track) - the probe in aec-test.html confirms it does
+   not merely ignore the argument - but recognition then returns nothing. No
+   results, no errors, just a recogniser that never hears anything. So it is
+   parked behind this flag rather than left on to look like a broken microphone.
+
+   Nothing depends on it. The reason for owning the stream is to MEASURE it, and
+   the level gate that drives barge-in reads micStream through our own
+   AudioContext regardless of which microphone SpeechRecognition decided to open.
+   All this flag would buy is cleaner transcripts while JARVIS is talking over
+   himself, and the barge-in design does not need those either: it detects on
+   level, stops him, and only then transcribes - by which point the mic is clear.
+
+   Flip it to true to retest on a later Chrome. */
+const USE_TRACK_INPUT = false;
+
+// Matches the configuration aec-test.html measured, deliberately. Gain control
+// is off because automatic gain riding would fight a level threshold, and noise
+// suppression is off because the numbers above were taken without it.
+const MIC_CONSTRAINTS = { echoCancellation:true, noiseSuppression:false, autoGainControl:false };
+
+let micStream = null, micTrack = null, micTrackInput = USE_TRACK_INPUT;
+
+async function acquireMic(){
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: MIC_CONSTRAINTS });
+    micTrack  = micStream.getAudioTracks()[0] || null;
+    if (micTrack){
+      const s = micTrack.getSettings();
+      console.log('[JARVIS] microphone: echoCancellation=' + s.echoCancellation);
+      // Tracks end on their own when a device is unplugged, or when Windows
+      // switches the default input. Going quietly deaf until reload is exactly
+      // the failure the speech watchdog exists to prevent, so reacquire.
+      micTrack.onended = () => {
+        console.warn('[JARVIS] microphone track ended - reacquiring');
+        micTrack = null;
+        if (wantListening) acquireMic().then(ok => { if (ok) startListening(); });
+      };
+    }
+    return true;
+  } catch(e){
+    console.warn('[JARVIS] microphone unavailable: ' + e.name + ' - ' + e.message);
+    micStream = null; micTrack = null;
+    return false;
+  }
+}
+
+/* ---------- on-device recognition ----------
+   Chrome can run recognition locally instead of streaming the microphone to
+   Google. For a microphone that sits on a child's head all afternoon that is
+   worth having on its own, and it also keeps working with the network down -
+   the same promise the LOCAL commands make.
+
+   The API was renamed while it was being standardised (availableOnDevice ->
+   available), so both spellings are tried; this machine has available(). All of
+   it is best effort. Any failure leaves cloud recognition running exactly as it
+   ran before. */
+let onDeviceReady = false, recogAnnounced = false, recogFails = 0;
+
+async function prepareOnDevice(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SR) return 'NONE';
+
+  const avail = ['available', 'availableOnDevice'].find(n => typeof SR[n] === 'function');
+  const inst  = ['install', 'installOnDevice'].find(n => typeof SR[n] === 'function');
+  if (!avail) return 'CLOUD';
+
+  // The options-bag form is the current one; the bare-string form was the
+  // original. Try the new shape first and fall back rather than guessing.
+  const call = async name => {
+    try { return await SR[name]({ langs:['en-GB'], processLocally:true }); }
+    catch(e){ try { return await SR[name]('en-GB'); } catch(e2){ return null; } }
+  };
+
+  const ready = s => s === 'available' || s === true;
+  let state = await call(avail);
+  console.log('[JARVIS] on-device recognition: ' + JSON.stringify(state));
+
+  if (ready(state)){ onDeviceReady = true; return 'ON-DEVICE'; }
+
+  if ((state === 'downloadable' || state === 'downloading') && inst){
+    // Never block boot on a language-pack download. Start it, carry on with
+    // cloud recognition, and switch over if and when it lands.
+    call(inst).then(async () => {
+      if (ready(await call(avail))){
+        onDeviceReady = true;
+        console.log('[JARVIS] on-device recognition ready - switching over');
+        if (wantListening) startListening();
+      }
+    }).catch(() => {});
+    return 'DOWNLOADING';
+  }
+  return 'CLOUD';
+}
+
+/* start(track) is Chrome 135+ and desktop-only. Anywhere else the argument is
+   either rejected or silently ignored, so fall back to the no-argument form and
+   let Chrome pick the default microphone, exactly as this did before. */
+function startRecog(){
+  if (micTrackInput && micTrack && micTrack.readyState === 'live'){
+    try { recog.start(micTrack); return; }
+    catch(e){
+      if (e && e.name === 'InvalidStateError') return;   // already listening
+
+      // Two new APIs are in play here and they may not combine. Echo
+      // cancellation is the one that matters - it is what stops him hearing
+      // himself - so if something has to go, give up the local model and keep
+      // the cancelled stream.
+      if (recog.processLocally){
+        console.warn('[JARVIS] start(track) refused with processLocally - retrying without it');
+        try {
+          recog.processLocally = false;
+          recog.start(micTrack);
+          onDeviceReady = false;
+          return;
+        } catch(e2){ /* fall through to the default microphone */ }
+      }
+
+      micTrackInput = false;    // one failure is enough; stop retrying every restart
+      console.warn('[JARVIS] start(track) refused (' + e.name + ') - using the default microphone');
+    }
+  }
+  try { recog.start(); }
+  catch(e){
+    if (!e || e.name !== 'InvalidStateError')
+      console.warn('[JARVIS] recognition failed to start: ' + (e && e.name));
+  }
+}
+
 /* ---------- speech recognition ----------
    Chrome on Android quietly stops continuous recognition every minute or so.
    The onend restart below is what keeps the helmet listening. Do not remove it. */
@@ -338,8 +514,15 @@ function startListening(){
   recog.continuous = true;
   recog.interimResults = true;
   recog.lang = 'en-GB';
+  // Only ever set when availability has actually been confirmed - see
+  // prepareOnDevice. Setting it optimistically is how you get a recogniser that
+  // refuses to start on a machine without the language pack.
+  if (onDeviceReady){ try { recog.processLocally = true; } catch(e){} }
 
   recog.onresult = e => {
+    // Anything at all coming back means the service is answering again.
+    if (recogFails){ recogFails = 0; if (!speaking) setState('Standby', 'listening'); }
+
     let interim = '', final = '';
     for (let i = e.resultIndex; i < e.results.length; i++){
       const t = e.results[i][0].transcript;
@@ -358,24 +541,73 @@ function startListening(){
     // are JARVIS hearing his own voice - never dispatch those as commands.
     if (speaking) { tryInterrupt(text, true); return; }
 
+    // Identifies and logs. Nothing is gated on it yet, deliberately - the log
+    // has to show it is right before it is allowed to decide anything.
+    whoSpoke();
+
     // The other half of the loop: once speech is cut off, the tail of his own
     // sentence still arrives as a final. Dispatching that is what let him
     // answer himself over and over.
-    if (isEcho(text)){ console.log('[JARVIS] ignored own voice: "' + text + '"'); return; }
+    // He cut in, so the blunt timing guard has to give - otherwise the reply he
+    // interrupted with is thrown away. The word comparison still runs.
+    if (isEcho(text, barged)){
+      console.log('[JARVIS] ignored own voice: "' + text + '"');
+      // Deliberately NOT clearing `barged` here. When somebody interrupts, the
+      // first final to arrive is the tail of JARVIS's own sentence, already in
+      // flight before he was stopped; what the person actually said lands after
+      // it. Spending the flag on the tail re-armed the timing guard against the
+      // real command, so he went deaf for a second at exactly the moment he had
+      // just been interrupted - which reads as him sulking.
+      if (barged) console.log('[JARVIS] that was his tail - still waiting for the interruption');
+      return;
+    }
+    if (barged){ barged = false; clearTimeout(bargedTimer); }
     handleSpeech(text);
   };
-  // Always restart - the mic is no longer stopped while speaking.
-  recog.onend = () => { if (wantListening) setTimeout(startListening, 120); };
-  recog.onerror = e => { if (e.error === 'not-allowed') { wantListening = false; setState('Mic blocked'); } };
+  // Always restart - the mic is no longer stopped while speaking. After a run of
+  // network failures, restarting instantly just hammers a service that is
+  // already refusing, so ease off rather than spinning.
+  recog.onend = () => {
+    if (!wantListening) return;
+    setTimeout(startListening, recogFails ? Math.min(400 * recogFails, 4000) : 120);
+  };
+  // One line per page load saying exactly which microphone and which model are
+  // in play. A recogniser that hears nothing looks identical to a quiet room,
+  // and that cost an evening - so say out loud what was actually configured.
+  recog.onstart = () => {
+    if (recogAnnounced) return;
+    recogAnnounced = true;
+    console.log('[JARVIS] recognition live on ' +
+      (micTrackInput && micTrack ? 'our echo-cancelled track' : "Chrome's own microphone") +
+      (onDeviceReady ? ', on-device model' : ', cloud model'));
+  };
+
+  recog.onerror = e => {
+    // 'no-speech' and 'aborted' fire constantly and mean nothing. Anything else
+    // is worth seeing rather than swallowing.
+    if (e.error !== 'no-speech' && e.error !== 'aborted')
+      console.warn('[JARVIS] recognition error: ' + e.error);
+    if (e.error === 'not-allowed') { wantListening = false; setState('Mic blocked'); return; }
+    // Recognition is a cloud service here and it does drop out. Say so on the
+    // HUD: a recogniser that has quietly stopped looks exactly like a helmet
+    // that has stopped caring, and there is no way to tell from the outside.
+    if (e.error === 'network' || e.error === 'service-not-allowed'){
+      recogFails++;
+      setState('Uplink lost');
+    }
+  };
 
   wantListening = true;
-  try { recog.start(); } catch(e){}
+  startRecog();
   if (!speaking) setState('Standby', 'listening');
 }
 
 function stopListening(){
   wantListening = false;
   if (recog) { try { recog.stop(); } catch(e){} }
+  // The track is deliberately left live. Stopping it would drop the echo
+  // cancellation and make Chrome re-prompt on some setups; recognition is what
+  // we are stopping here, not the microphone.
 }
 
 /* ---------- interrupting him mid-sentence ----------
@@ -430,10 +662,13 @@ function echoRun(heard, spoken){
   return h.length ? best / h.length : 0;
 }
 
-function isEcho(text){
+/* afterBarge relaxes the timing rule only. It must never relax the comparison
+   below: a barge-in that fired on noise is followed by JARVIS's own tail, and
+   waving that through on trust is precisely how he ends up answering himself. */
+function isEcho(text, afterBarge){
   const since = performance.now() - speechEndedAt;
   // The tail of his own sentence arrives just after it is cut off.
-  if (!speaking && since < ECHO_TAIL_MS) return true;
+  if (!speaking && since < ECHO_TAIL_MS && !afterBarge) return true;
 
   // Compare against his own words only while they could still be arriving.
   // Keeping them indefinitely made him deaf to any command that repeated
@@ -458,6 +693,410 @@ function bargeStorm(){
   }
   return false;
 }
+
+/* ---------- barge-in by level ----------
+   This is the mechanism. Everything above it - the keyword list, the echo run
+   comparison - was written when a transcript was the only signal available.
+   Owning the echo-cancelled stream gives a better one.
+
+   Measured on the laptop, on the cancelled stream (aec-test.html):
+
+     room, silent .................. -63.8 dB
+     JARVIS talking, alone ......... -66.0 dB   quieter than the empty room
+     someone talking over him ...... -33.8 dB
+
+   Thirty-two decibels apart. His own voice is cancelled to below the noise
+   floor while a person's is not cancelled at all, because the canceller backs
+   off the moment it hears a second voice - ERLE collapses from 32.8 dB to 5.0.
+   So "is somebody talking over him?" stops being a guess about words and
+   becomes a question about level, which is a question that has an answer.
+
+   He no longer needs a keyword. He interrupts by talking, like anyone would.
+
+   Two things this still cannot do, both fixed by the voice roster later: it
+   cannot tell him from his father, and it cannot tell him from the television.
+   bargeStorm() stays exactly where it is until it can. */
+
+/* Tuned against a real session rather than the bench measurement, because the
+   first guess was about 20 dB too sensitive. What that session showed:
+
+     a person talking over him ....... -34 dB, and -21 dB when close
+     fires that were not people ...... -47, -51, -55 dB
+
+   A margin over the learned floor is not enough on its own: the floor pins to
+   -70 in a quiet room, so floor+12 armed the gate at -58 and it tripped on
+   room noise and on residual echo. Hence the absolute limit - whatever the
+   floor says, a human talking into a laptop is not quieter than -42 dB.
+
+   Erring towards missing is deliberate. A missed interrupt costs him saying it
+   twice; a false one lets his own voice through, and that is the loop. */
+const BARGE_MARGIN_DB = 20;      // above the floor his own voice sits at
+const BARGE_FLOOR_MIN = -70;     // clamp the learned floor into a sane window so
+const BARGE_FLOOR_MAX = -50;     // a silent room cannot arm a hair trigger
+const BARGE_ABS_MIN   = -42;     // and never arm below this, whatever the floor
+const BARGE_HOLD_MS   = 250;     // sustained voice, not a door closing
+
+let meterAnalyser = null, meterBuf = null, meterRunning = false;
+let bargeFloor = null, bargeAboveSince = 0, bargePeak = -Infinity, bargeFired = false, bargeF0 = 0;
+let barged = false, bargedTimer = 0;
+// How long an interruption stays live: the tail-guard relaxation and the armed
+// window are the same span deliberately, so they cannot drift apart. The arm
+// must not outlive `barged`, or a barge that fired on the television could
+// dispatch a televised sentence with the echo guard already asleep; and it must
+// not be shorter either, because the gate fires a quarter-second into the
+// interrupting phrase and Chrome's final for it lands seconds later.
+const BARGE_LIVE_MS = 5000;
+let interruptedAt = 0;          // only for the timing line - see handleSpeech
+
+function startMeter(){
+  if (meterRunning || !micStream) return false;
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const src = ctx.createMediaStreamSource(micStream);
+    meterAnalyser = ctx.createAnalyser();
+    // 2048 at 48 kHz is 43 ms - long enough to hold three periods of a low male
+    // voice, which the pitch detector below needs and 1024 could not give it.
+    meterAnalyser.fftSize = 2048;
+    meterAnalyser.smoothingTimeConstant = 0;   // averaging across frames blurs the timbre
+    src.connect(meterAnalyser);   // never to ctx.destination - that is a howl
+    meterBuf = new Float32Array(meterAnalyser.fftSize);
+    meterFreq = new Float32Array(meterAnalyser.frequencyBinCount);
+    meterRate = ctx.sampleRate;
+    pitchBuf  = new Float32Array(Math.floor(meterAnalyser.fftSize / PITCH_DECIM));
+    buildMel();
+    melEnergy = new Float32Array(MEL_BANDS);
+    meterRunning = true;
+    requestAnimationFrame(meterTick);
+    console.log('[JARVIS] level meter running on the echo-cancelled stream');
+    return true;
+  } catch(e){
+    console.warn('[JARVIS] level meter unavailable: ' + e.message);
+    return false;
+  }
+}
+
+/* ---------- whose voice is that? ----------
+   Level alone took this as far as it goes. A session with it running showed
+   real interruptions landing at -20 to -28 dB and JARVIS's own leaked syllables
+   reaching -23 to -36 dB. Those ranges overlap, so no threshold separates them.
+
+   Pitch does. JARVIS is a synthesised voice, which means his fundamental is
+   both consistent and knowable - and we get to measure it for free, because the
+   settle window at the start of every utterance is a moment when he is provably
+   the only one talking. Learn his pitch there, then refuse to be interrupted by
+   anything speaking at it.
+
+   That is the roster's cheap half, arriving early because the data asked for
+   it. It self-calibrates, so it survives a change of voice or rate, and it
+   costs no model and no network. What it still cannot do is tell one person
+   from another - a voice unlike JARVIS's interrupts him whoever it belongs to. */
+
+const PITCH_DECIM   = 4;     // 48 kHz down to 12 kHz; F0 lives far below Nyquist
+const PITCH_MIN_HZ  = 70, PITCH_MAX_HZ = 400;
+const PITCH_TOL     = 0.12;  // within 12% of his own pitch counts as him
+let   meterRate = 48000, pitchBuf = null, ncBuf = null;
+let   jarvisF0 = 0, f0Samples = [];
+
+/* Autocorrelation, on a box-averaged decimation of the same frame the level
+   came from. Returns 0 for anything unvoiced - which usefully means a door
+   closing or a keyboard cannot interrupt him, only a voice can. */
+function pitchHz(){
+  const n = pitchBuf.length;
+  for (let i = 0; i < n; i++){
+    let s = 0;
+    for (let k = 0; k < PITCH_DECIM; k++) s += meterBuf[i * PITCH_DECIM + k];
+    pitchBuf[i] = s / PITCH_DECIM;      // crude low-pass, enough before decimating
+  }
+  const sr = meterRate / PITCH_DECIM;
+
+  let energy = 0;
+  for (let i = 0; i < n; i++) energy += pitchBuf[i] * pitchBuf[i];
+  if (energy / n < 1e-8) return 0;
+
+  const minLag = Math.floor(sr / PITCH_MAX_HZ);
+  const maxLag = Math.min(Math.floor(sr / PITCH_MIN_HZ), n - 1);
+  if (!ncBuf || ncBuf.length < maxLag + 1) ncBuf = new Float32Array(maxLag + 1);
+
+  // Normalised against both windows rather than the frame energy, so the score
+  // is bounded and long lags do not flatter themselves.
+  for (let lag = minLag; lag <= maxLag; lag++){
+    let num = 0, e1 = 0, e2 = 0;
+    for (let i = 0; i + lag < n; i++){
+      const a = pitchBuf[i], b = pitchBuf[i + lag];
+      num += a * b; e1 += a * a; e2 += b * b;
+    }
+    const den = Math.sqrt(e1 * e2);
+    ncBuf[lag] = den > 0 ? num / den : 0;
+  }
+
+  let best = 0;
+  for (let lag = minLag; lag <= maxLag; lag++) if (ncBuf[lag] > best) best = ncBuf[lag];
+  if (best < 0.4) return 0;              // not periodic enough to be a voice
+
+  // Octave correction. A periodic signal correlates just as well at twice its
+  // period, so picking the highest peak picks an arbitrary multiple - which
+  // read a 270 Hz child as a 135 Hz adult, exactly the wrong way round for the
+  // one decision this function exists to make. Take the SHORTEST lag that is
+  // nearly as good as the best.
+  for (let lag = minLag; lag <= maxLag; lag++)
+    if (ncBuf[lag] >= best * 0.9) return sr / lag;
+  return 0;
+}
+
+const soundsLikeJarvis = f0 =>
+  jarvisF0 > 0 && f0 > 0 && Math.abs(f0 - jarvisF0) / jarvisF0 < PITCH_TOL;
+
+/* ---------- who is speaking ----------
+   Mel-frequency cepstral coefficients, worked out and validated in
+   voices-test.html rather than guessed at here. Mel filterbank, log energies,
+   DCT, coefficients 1 to 12; coefficient zero is loudness and is never
+   computed, which is what makes this indifferent to how close somebody stands.
+
+   The first attempt used plain log-spaced bands and failed its own test: at the
+   bottom of the range those bands were narrower than the gap between a voice's
+   harmonics, so the vector encoded pitch, which we already measure separately.
+   The DCT is what fixes that - the vocal tract lives in the low coefficients
+   and the harmonic comb in the high ones, which get thrown away.
+
+   Measured on this household: fourteen of fourteen held-out takes identified
+   correctly, tightest margin 0.073.
+
+   NOTHING IS GATED ON THIS YET. It identifies and it logs, and that is all,
+   until the log says it is right often enough to be trusted with the decision.
+
+   Two guards come straight out of the test session. A run that named the wrong
+   person did it with a margin of 0.023, while every correct answer cleared
+   0.072 - so an answer that close is recorded as nobody rather than as a guess.
+   And that same run was 182 Hz while the person it named speaks at 325, so the
+   pitch has to agree with the enrolled voice as well. */
+
+const MEL_BANDS = 32, MFCC_N = 12, MEL_LO = 300, MEL_HI = 7000;
+const ROSTER_MARGIN    = 0.05;   // closer than this between first and second is a coin toss
+const ROSTER_PITCH_TOL = 0.35;   // and the pitch has to be plausible for that person
+const VOICE_ACTIVE_DB  = -45;    // quieter than this is not someone talking to us
+const TAKE_MIN_FRAMES  = 12;
+const TAKE_GAP_MS      = 1200;   // silence this long ends a phrase
+
+let meterFreq = null, melFilters = [], melEnergy = null;
+let heardTake = null, heardLastAt = 0, enrolling = false;
+
+const hzToMel = f => 2595 * Math.log10(1 + f / 700);
+const melToHz = m => 700 * (Math.pow(10, m / 2595) - 1);
+
+function buildMel(){
+  const lo = hzToMel(MEL_LO), hi = hzToMel(MEL_HI);
+  const pts = [];
+  for (let i = 0; i < MEL_BANDS + 2; i++)
+    pts.push(melToHz(lo + (hi - lo) * i / (MEL_BANDS + 1)) * meterAnalyser.fftSize / meterRate);
+  melFilters = [];
+  for (let b = 0; b < MEL_BANDS; b++) melFilters.push([pts[b], pts[b + 1], pts[b + 2]]);
+}
+
+function mfccFrame(){
+  meterAnalyser.getFloatFrequencyData(meterFreq);
+  for (let b = 0; b < MEL_BANDS; b++){
+    const f = melFilters[b], start = f[0], mid = f[1], end = f[2];
+    let sum = 0;
+    for (let i = Math.max(1, Math.floor(start)); i <= Math.min(Math.ceil(end), meterFreq.length - 1); i++){
+      const w = i <= mid ? (i - start) / (mid - start) : (end - i) / (end - mid);
+      if (w > 0) sum += w * Math.pow(10, Math.max(meterFreq[i], -100) / 10);
+    }
+    melEnergy[b] = Math.log(Math.max(sum, 1e-10));
+  }
+  const v = new Float32Array(MFCC_N);
+  let norm = 0;
+  for (let k = 1; k <= MFCC_N; k++){
+    let s = 0;
+    for (let b = 0; b < MEL_BANDS; b++)
+      s += melEnergy[b] * Math.cos(Math.PI * k * (b + 0.5) / MEL_BANDS);
+    v[k - 1] = s; norm += s * s;
+  }
+  norm = Math.sqrt(norm);
+  if (norm < 1e-6) return null;
+  for (let i = 0; i < MFCC_N; i++) v[i] /= norm;
+  return v;
+}
+
+/* Called every frame while JARVIS is quiet. Voiced frames only - which means a
+   door closing contributes nothing, and neither does the canceller's residue. */
+function collectVoiced(db){
+  const now = performance.now();
+  // A pause ends a phrase - except while enrolling, where the pauses between
+  // sentences are part of the same take.
+  if (heardTake && !enrolling && now - heardLastAt > TAKE_GAP_MS) heardTake = null;
+  if (db < VOICE_ACTIVE_DB) return;
+  const f0 = pitchHz();
+  if (!f0) return;
+  const v = mfccFrame();
+  if (!v) return;
+  if (!heardTake) heardTake = { vecs: [], pitches: [] };
+  heardTake.vecs.push(v);
+  heardTake.pitches.push(f0);
+  heardLastAt = now;
+}
+
+function finishTake(take){
+  if (!take || take.vecs.length < TAKE_MIN_FRAMES) return null;
+  const c = new Float32Array(MFCC_N);
+  for (const v of take.vecs) for (let b = 0; b < MFCC_N; b++) c[b] += v[b];
+  let norm = 0;
+  for (let b = 0; b < MFCC_N; b++){ c[b] /= take.vecs.length; norm += c[b] * c[b]; }
+  norm = Math.sqrt(norm);
+  for (let b = 0; b < MFCC_N; b++) c[b] /= norm;
+  const p = take.pitches.slice().sort((a, b) => a - b);
+  return { v: Array.from(c, x => +x.toFixed(4)), f0: +p[p.length >> 1].toFixed(1),
+           frames: take.vecs.length };
+}
+
+const cosine = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
+
+/* ---------- the roster ---------- */
+let roster = [];
+function loadRoster(){
+  try { roster = JSON.parse(store.get('roster', '[]')) || []; } catch(e){ roster = []; }
+}
+function saveRoster(){ store.set('roster', JSON.stringify(roster)); }
+
+/* Against the best-matching take, not an averaged centroid. Averaging takes
+   recorded on different days blurs them together; the nearest one is what
+   actually decides. */
+function identify(take){
+  if (!roster.length) return null;
+  const ranked = roster.map(p => {
+    let best = -1, f0 = 0;
+    for (const t of p.takes){
+      const s = cosine(take.v, t.v);
+      if (s > best){ best = s; f0 = t.f0; }
+    }
+    return { name: p.name, allow: p.allow !== false, s: best, f0 };
+  }).sort((a, b) => b.s - a.s);
+
+  const top = ranked[0], second = ranked[1] || null;
+  const margin = second ? top.s - second.s : 1;
+  const pitchOff = top.f0 ? Math.abs(take.f0 - top.f0) / top.f0 : 0;
+
+  const sure = margin >= ROSTER_MARGIN && pitchOff <= ROSTER_PITCH_TOL;
+  return { name: sure ? top.name : null, candidate: top.name, allow: top.allow,
+           score: top.s, margin, pitchOff, f0: take.f0,
+           second: second ? second.name : null, sure };
+}
+
+/* Consumes the phrase just heard and says who it belonged to. */
+function whoSpoke(){
+  const t = finishTake(heardTake);
+  heardTake = null;
+  if (!t) return null;
+  const id = identify(t);
+  if (!id) return null;
+  console.log('[JARVIS] voice: ' + (id.sure ? id.name : 'unknown') +
+    ' (closest ' + id.candidate + ' ' + id.score.toFixed(3) +
+    (id.second ? ', over ' + id.second : '') +
+    ', margin ' + id.margin.toFixed(3) +
+    ', ' + Math.round(id.f0) + ' Hz vs their ' + Math.round(
+      roster.find(p => p.name === id.candidate).takes[0].f0) + ' Hz)');
+  return id;
+}
+
+function levelDb(){
+  meterAnalyser.getFloatTimeDomainData(meterBuf);
+  let s = 0;
+  for (let i = 0; i < meterBuf.length; i++) s += meterBuf[i] * meterBuf[i];
+  return 20 * Math.log10(Math.max(Math.sqrt(s / meterBuf.length), 1e-9));
+}
+
+function meterTick(){
+  if (!meterRunning) return;
+  requestAnimationFrame(meterTick);
+  const db = levelDb();
+  // While he is quiet, gather what we hear so the roster can say whose it was.
+  // While he talks, the only question is whether somebody is talking over him.
+  if (!speaking){ collectVoiced(db); return; }
+  if (cfg.barge === 'off' || bargeFired) return;
+
+  if (db > bargePeak) bargePeak = db;
+  if (bargeFloor === null || db < bargeFloor) bargeFloor = db;
+
+  // The canceller has not converged during the first syllable and the onset
+  // leaks. Learn the floor - and his pitch - through the settle window; never
+  // fire inside it, because he is the only one we can be sure is talking.
+  if (performance.now() - speakStartedAt < SETTLE_MS){
+    const f = pitchHz();
+    if (f) f0Samples.push(f);
+    return;
+  }
+  if (!jarvisF0 && f0Samples.length >= 3){
+    const s = f0Samples.slice().sort((a, b) => a - b);
+    jarvisF0 = s[s.length >> 1];        // median: one bad frame cannot skew it
+  }
+
+  const floor = Math.min(Math.max(bargeFloor, BARGE_FLOOR_MIN), BARGE_FLOOR_MAX);
+  const threshold = Math.max(floor + BARGE_MARGIN_DB, BARGE_ABS_MIN);
+
+  if (db > threshold){
+    // Loud enough - but is it a voice, and is it his? Only run the detector
+    // here, where it is rare, rather than on every frame.
+    const f0 = pitchHz();
+    if (!f0 || soundsLikeJarvis(f0)){ bargeAboveSince = 0; return; }
+
+    if (!bargeAboveSince) bargeAboveSince = performance.now();
+    if (performance.now() - bargeAboveSince >= BARGE_HOLD_MS){
+      bargeF0 = f0;
+      bargeFired = true;
+      if (performance.now() < bargeOffUntil) return;
+      console.log('[JARVIS] barge-in: ' + db.toFixed(1) + ' dB over ' +
+                  threshold.toFixed(1) + ' dB, at ' + f0.toFixed(0) + ' Hz' +
+                  (jarvisF0 ? ' (he is ' + jarvisF0.toFixed(0) + ' Hz)' : ''));
+      if (bargeStorm()){ stopSpeaking(); return; }
+      interruptNow('level');
+    }
+  } else {
+    bargeAboveSince = 0;
+  }
+}
+
+/* Shared by the level gate and the spacebar, so both behave identically. */
+function interruptNow(how){
+  console.log('[JARVIS] interrupted by ' + how);
+  abandonSpeech = true;           // lets multi-line sequences bail out
+  stopSpeaking();
+  chirp();
+
+  // stopSpeaking() nulls currentUtterance, so the utterance's own finish() sees
+  // itself superseded and skips the restart at the end of speakAwait. With
+  // barge-in off - the shipped default - the mic was stopped for the duration
+  // of the speech, so nothing would have brought it back: a spacebar interrupt
+  // left the helmet deaf until reload while the HUD read "Standby / listening".
+  if (!wantListening) startListening();
+
+  // isEcho drops every final for ECHO_TAIL_MS after he stops, which is right
+  // when the tail is his - and wrong here, where we stopped him precisely
+  // because somebody else was talking. Let the next one through.
+  barged = true;
+  clearTimeout(bargedTimer);
+  bargedTimer = setTimeout(() => { barged = false; }, BARGE_LIVE_MS);
+  interruptedAt = performance.now();
+
+  // Somebody who has just cut in is by definition talking to him, so the words
+  // that follow are a command and need no wake word. Without this the whole
+  // point of barge-in was lost: he stopped, heard the interruption, matched no
+  // wake word, and silently dropped it - so it had to be said all over again
+  // (session log 2026-08-27). Armed, not latched: a false barge must not turn
+  // the next thing said in the room into a command, so the window expires.
+  armForCommand('the interruption', BARGE_LIVE_MS);
+}
+
+/* Push-to-interrupt. Always available regardless of the toggle, because it
+   cannot misfire - and because it is the ground truth the level gate is
+   measured against. A spacebar press that the gate did not already catch is a
+   miss, and it says so. */
+document.addEventListener('keydown', e => {
+  if (e.code !== 'Space' || e.repeat || !speaking) return;
+  if (panel.style.display === 'flex') return;      // typing in Settings
+  e.preventDefault();
+  if (!bargeFired && cfg.barge === 'on')
+    console.warn('[JARVIS] spacebar caught what the level gate missed');
+  interruptNow('spacebar');
+});
 
 /* Stopping and acting are split deliberately. Stopping has to happen on an
    interim result - a final one only lands a second or two after he stops
@@ -487,6 +1126,35 @@ function tryInterrupt(text, andDispatch){
 /* Speech engines mangle "Jarvis" in fairly predictable ways. */
 const WAKE = /\b(jarvis|jervis|javis|jarviss|jaris|service|charvis)\b/;
 
+/* Being armed - waiting for a command with no wake word - has to expire. It
+   used to latch until something was dispatched, so after a bare "Jarvis" the
+   next sentence anyone spoke, however much later, was taken as a command.
+   8 s matches what bargedTimer was reaching for: long enough to finish the
+   thought you paused in the middle of, short enough that the room does not
+   inherit the microphone. */
+const ARM_MS = 8000;
+let armTimer = 0;
+
+/* The barge path passes BARGE_LIVE_MS rather than the full window. A barge that
+   fired on the television arms him with nobody having addressed him, so that
+   window is held down to the one in which `barged` is still set and the whole
+   interruption is still live. The full 8 s stays on the wake-word path, where a
+   human demonstrably spoke to him. */
+function armForCommand(why, ms){
+  awaitingCommand = true;
+  clearTimeout(armTimer);
+  armTimer = setTimeout(() => {
+    awaitingCommand = false;
+    console.log('[JARVIS] armed window expired (' + why + ') - wake word needed again');
+    // Only repaint if he is actually listening: this fires 8 s later, by which
+    // time Settings may be open (which stops the recogniser) or the mic may
+    // have been blocked, and both of those states must survive.
+    if (!speaking && wantListening) setState('Standby', 'listening');
+  }, ms || ARM_MS);
+}
+
+function disarm(){ awaitingCommand = false; clearTimeout(armTimer); }
+
 function handleSpeech(text){
   heardEl.textContent = text;
   const m = text.match(WAKE);
@@ -500,14 +1168,26 @@ function handleSpeech(text){
     const after  = text.slice(m.index + m[0].length).replace(/^[\s,.]+/, '');
     const rest   = (after || before).trim();
 
-    if (rest.length > 1){ awaitingCommand = false; dispatch(rest); }
+    if (rest.length > 1){ disarm(); dispatch(rest); }
     else {
       console.log('[JARVIS] wake word only - armed, waiting for a command');
-      awaitingCommand = true; setState('Listening', 'listening'); chirp();
+      armForCommand('wake word'); setState('Listening', 'listening'); chirp();
     }
     return;
   }
-  if (awaitingCommand){ awaitingCommand = false; dispatch(text); }
+  if (awaitingCommand){
+    disarm();
+    // The delta is the number that settles whether BARGE_LIVE_MS is long
+    // enough: the gate fires ~BARGE_HOLD_MS into the interrupting phrase and
+    // the final for it lands only after the speaker stops. If a real
+    // interruption ever shows a delta near BARGE_LIVE_MS, the window is too
+    // tight and the 2026-08-27 dropped-command symptom will be back.
+    console.log('[JARVIS] armed - taking this as a command' +
+      (interruptedAt ? ' (' + Math.round(performance.now() - interruptedAt) +
+                       ' ms after the interrupt)' : ''));
+    interruptedAt = 0;
+    dispatch(text);
+  }
 }
 
 /* ---------- commands that never touch the network ---------- */
@@ -861,11 +1541,28 @@ function loadVoices(){
     if (!voices.length){ speechSynthesis.onvoiceschanged = grab; setTimeout(resolve, 1500); }
   });
 }
+/* The old list held only legacy SAPI and Apple names, so on a machine with the
+   modern Azure voices installed nothing matched and it fell through to gb[0] -
+   which is Sonia, a female voice. The intent here has always been a male one.
+
+   Ryan and Thomas are the en-GB male "Natural" voices. Note the word boundaries:
+   a bare /male/ matches "Female" too, which is how a list meant to find a man
+   could have picked a woman even once the right name was on it.
+
+   Natural voices are preferred because they sound enormously better and because
+   the echo cancellation measured in aec-test.html was measured with one - a
+   local SAPI voice may not render through the same path, which would put that
+   32.8 dB back in question. The cost is real: they are network voices, so this
+   is the one part of JARVIS that cannot speak with the router down. The Settings
+   picker overrides all of it. */
+const MALE_VOICE = /\b(ryan|thomas|george|oliver|alan|daniel|arthur|male)\b/i;
+
 function pickVoice(){
   if (cfg.voice){ const v = voices.find(v => v.name === cfg.voice); if (v) return v; }
   const gb = voices.filter(v => /en[-_]GB/i.test(v.lang));
-  const male = gb.find(v => /male|daniel|arthur|george|oliver|alan/i.test(v.name));
-  return male || gb[0] || voices.find(v => /^en/i.test(v.lang)) || voices[0];
+  const male = gb.filter(v => MALE_VOICE.test(v.name));
+  return male.find(v => /natural/i.test(v.name)) || male[0] ||
+         gb[0] || voices.find(v => /^en/i.test(v.lang)) || voices[0];
 }
 function fillVoiceList(){
   const sel = $('pVoice'); sel.innerHTML = '';
@@ -916,6 +1613,11 @@ function speakAwait(text){
     speakStartedAt = performance.now();
     setState('Speaking', 'speaking');
 
+    // Per-utterance, because the floor is learned fresh each time - the room,
+    // the distance and the canceller's convergence all move between sentences.
+    bargeFloor = null; bargeAboveSince = 0; bargePeak = -Infinity; bargeFired = false;
+    jarvisF0 = 0; f0Samples = []; bargeF0 = 0;   // his pitch is relearnt each time
+
     // This is now the normal path: the mic sleeps while he talks, so it cannot
     // hear itself and no feedback loop is possible.
     if (cfg.barge === 'off') stopListening();
@@ -924,6 +1626,14 @@ function speakAwait(text){
     let watchdog = 0;
     const finish = () => {
       clearTimeout(watchdog);
+      // One line per utterance while barge-in is on. This is the tuning data:
+      // if peak never approaches the threshold when he talks over JARVIS, the
+      // margin is too wide; if it fires on nothing, too narrow.
+      if (cfg.barge === 'on' && bargePeak > -Infinity && bargeFloor !== null)
+        console.log('[JARVIS] utterance: floor ' + bargeFloor.toFixed(1) +
+                    ' dB, peak ' + bargePeak.toFixed(1) + ' dB, his pitch ' +
+                    (jarvisF0 ? jarvisF0.toFixed(0) + ' Hz' : 'not measured') + ', ' +
+                    (bargeFired ? 'FIRED at ' + bargeF0.toFixed(0) + ' Hz' : 'no barge'));
       // Superseded or already stopped: resolve so any awaiting sequence
       // unblocks, but leave the newer utterance's state alone.
       if (currentUtterance === u){
@@ -1009,9 +1719,63 @@ function openPanel(){
   $('pBarge').value = cfg.barge;
   $('pEndpoint').placeholder = DEFAULTS[cfg.provider].endpoint;
   $('pModel').placeholder = DEFAULTS[cfg.provider].model;
+  renderVoices();
   panel.style.display = 'flex';
   stopListening();
 }
+
+function renderVoices(){
+  const el = $('pVoices');
+  if (!roster.length){ el.innerHTML = '<p class="note">Nobody enrolled.</p>'; return; }
+  el.innerHTML = '';
+  roster.forEach((p, i) => {
+    const row = document.createElement('div');
+    row.className = 'vrow';
+    const f0 = Math.round(p.takes.reduce((a, t) => a + t.f0, 0) / p.takes.length);
+    row.innerHTML = '<div><b>' + p.name + '</b> <em>' + p.takes.length + ' take' +
+      (p.takes.length === 1 ? '' : 's') + ' · about ' + f0 + ' Hz</em></div>';
+    const del = document.createElement('button');
+    del.className = 'ghost';
+    del.textContent = 'Remove';
+    del.onclick = () => { roster.splice(i, 1); saveRoster(); renderVoices(); };
+    row.appendChild(del);
+    el.appendChild(row);
+  });
+}
+
+/* Recording runs off the meter that is already going, so enrolment hears
+   exactly what the roster will hear later - same stream, same cancellation,
+   same room. A fingerprint taken any other way would not match. */
+$('pVoiceRec').addEventListener('click', () => {
+  const name = $('pVoiceName').value.trim();
+  const stage = $('pVoiceStage'), btn = $('pVoiceRec');
+  if (!name){ stage.textContent = 'Give the voice a name first.'; return; }
+  if (!meterRunning){ stage.textContent = 'The microphone is not running - reload and allow it.'; return; }
+
+  btn.disabled = true;
+  heardTake = null; enrolling = true;
+  const until = performance.now() + 5000;
+  stage.textContent = 'Talk now, and keep talking…';
+
+  (function tick(){
+    if (performance.now() < until){
+      stage.textContent = 'Recording… ' + (heardTake ? heardTake.vecs.length : 0) + ' voiced frames';
+      requestAnimationFrame(tick);
+      return;
+    }
+    const t = finishTake(heardTake);
+    heardTake = null; enrolling = false; btn.disabled = false;
+    if (!t){ stage.textContent = 'Not enough voiced audio - talk continuously, a little louder.'; return; }
+
+    let p = roster.find(x => x.name.toLowerCase() === name.toLowerCase());
+    if (!p){ p = { name, allow: true, takes: [] }; roster.push(p); }
+    p.takes.push(t);
+    saveRoster(); renderVoices();
+    stage.textContent = 'Captured ' + name + ' — ' + t.frames + ' frames, about ' +
+                        Math.round(t.f0) + ' Hz. Two more takes, different words.';
+    console.log('[JARVIS] enrolled "' + name + '": ' + t.frames + ' frames, ' + t.f0.toFixed(0) + ' Hz');
+  })();
+});
 $('pProvider').addEventListener('change', e => {
   $('pEndpoint').placeholder = DEFAULTS[e.target.value].endpoint;
   $('pModel').placeholder = DEFAULTS[e.target.value].model;
