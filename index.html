@@ -167,6 +167,36 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
     <div id="said"></div>
   </div>
 
+  <!-- Small, but present: YouTube's terms want the player visible while it
+       plays, and a hidden iframe would also hide the fact that music is on. -->
+  <!-- Bottom-left, clear of #gear in the opposite corner, and 200x200 because
+       that is the minimum YouTube's developer policies state for an embedded
+       player. Parked off-screen rather than display:none'd when idle: a
+       YT.Player created inside a display:none container may never reach
+       onReady, and if it does not then playerReady stays false and every
+       request answers "the music player is still waking up" for the life of
+       the page. Off-screen renders normally and intercepts nothing. -->
+  <div id="tube" style="position:fixed;left:-9999px;bottom:12px;width:200px;height:200px;
+       border-radius:6px;overflow:hidden;opacity:.9;z-index:4"></div>
+  <!-- Tap the player to stop it. Voice is the one channel a loudspeaker three
+       inches from the microphone degrades, and WAKE_STRICT narrows it further
+       on purpose - so the escape hatch is at its weakest exactly when it is
+       most needed. This one does not go through the microphone at all. The
+       BLE button in CLAUDE.md is the same argument in hardware.
+
+       Beside the player, never over it: a transparent div painted across a
+       playing video is the "obscured" case those same policies call out, and
+       the first version of this was exactly that. It is also why neither box
+       goes anywhere near #gear any more - an overlay in that corner swallowed
+       every press on the gear whether or not music was playing, because an
+       early return in a handler stops the action and not the hit test, and
+       #gear is the only way into Settings. -->
+  <div id="tubeStop" title="Tap to stop the music"
+       style="position:fixed;left:12px;bottom:220px;width:200px;height:34px;display:none;
+       border-radius:6px;z-index:5;cursor:pointer;text-align:center;line-height:34px;
+       font-size:.8rem;letter-spacing:.14em;background:rgba(0,0,0,.55);
+       border:1px solid var(--cyan);color:var(--cyan)">STOP MUSIC</div>
+
   <div id="gear" title="Hold to open settings"></div>
 </div>
 
@@ -188,6 +218,11 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
       <option value="off">Off — mic sleeps while he talks</option>
       <option value="on">On — just talk over him, no keyword needed</option>
     </select></div>
+  <div class="row"><label for="pGate">Who he listens to</label>
+    <select id="pGate">
+      <option value="anyone">Anyone</option>
+      <option value="roster">Only the voices he knows</option>
+    </select></div>
   <div class="row"><label>Voices he knows</label>
     <div id="pVoices"></div>
     <div class="vadd">
@@ -197,6 +232,18 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
     <p class="note" id="pVoiceStage">Three takes each, saying something different every time.
     He does not act on this yet — he listens to everyone and only reports who he thinks it was.</p>
   </div>
+  <div class="row"><label for="pTracks">Music</label>
+    <textarea id="pTracks" rows="4" placeholder="one per line:  dinosaur song = https://youtu.be/..."></textarea>
+    <p class="note">Paste YouTube links you have watched yourself. He can only ever play what is
+    on this list - there is no search and no autoplay of anything else.</p>
+  </div>
+  <div class="row"><label for="pLive">Live answers</label>
+    <select id="pLive">
+      <option value="off">Off - the model answers, and may invent it</option>
+      <option value="on">On - weather comes from Open-Meteo</option>
+    </select></div>
+  <div class="row"><label for="pPlace">Where we are</label>
+    <input id="pPlace" placeholder="town name, or blank to ask the phone"></div>
   <p class="note">The key is stored on this phone only. Set a monthly spend cap in your provider's
   dashboard. For Ollama, start it with OLLAMA_ORIGINS=* so the browser is allowed to reach it.</p>
   <div class="btns">
@@ -239,7 +286,20 @@ const cfg = {
   model:    store.get('model', ''),
   key:      store.get('key', ''),
   voice:    store.get('voice', ''),
-  barge:    store.get('barge', 'off')
+  barge:    store.get('barge', 'off'),
+  // Who he answers. Defaults to 'anyone', and an empty roster behaves exactly
+  // as it always has however this is set - gating with nobody enrolled would
+  // make the helmet deaf, and that is not a state a toggle should be able to
+  // reach by accident.
+  gate:     store.get('gate', 'anyone'),
+  /* Live facts - weather today - from a real API rather than the model's
+     imagination. Off by default: it reaches the network on his behalf, and
+     that is a decision to take deliberately rather than inherit. */
+  live:     store.get('live', 'off'),
+  // Where "here" is. Filled once by geolocation, or typed in Settings.
+  place:    store.get('place', ''),
+  lat:      store.get('lat', ''),
+  lon:      store.get('lon', '')
 };
 /* Served through the Caddy proxy on the LAN, Ollama sits behind /api on this
    same origin - which is what makes the microphone work (https is a secure
@@ -284,6 +344,16 @@ function status(id, text, bad){
 /* ---------- boot ---------- */
 $('initBtn').addEventListener('click', boot);
 
+/* The non-voice way out of music. Keyed on the player being up rather than on
+   musicOn: a track that YouTube paused clears musicOn while the player is still
+   sitting there loaded, and a visible player that cannot be dismissed by
+   tapping it is worse than no tap target at all. */
+$('tubeStop').addEventListener('click', () => {
+  if (!playerReady) return;
+  console.log('[JARVIS] music: stopped by tap');
+  stopMusic();
+});
+
 async function boot(){
   gate.style.display = 'none';
   bootlog.style.display = 'flex';
@@ -307,7 +377,14 @@ async function boot(){
   if (micOK) startMeter();
   loadRoster();
   if (roster.length)
-    console.log('[JARVIS] roster: ' + roster.map(p => p.name + ' (' + p.takes.length + ')').join(', '));
+    console.log('[JARVIS] roster: ' + roster.map(p =>
+      p.name + ' (' + p.takes.length + (p.allow === false ? ', ignored' : '') + ')').join(', '));
+  // One line saying whether the gate is live. A helmet that has quietly stopped
+  // answering a voice must not look like a helmet that cannot hear.
+  console.log('[JARVIS] listening to: ' +
+    (cfg.gate === 'roster'
+      ? (roster.length ? 'enrolled voices only' : 'anyone - gate is on but nobody is enrolled')
+      : 'anyone'));
 
   await loadVoices();
   await log('VOICE SYNTHESIS', 'ONLINE');
@@ -330,6 +407,13 @@ async function boot(){
   await log('HELMET LINK', bleChar ? 'CONNECTED' : 'STANDALONE', false);
   status('sHelmet', bleChar ? 'Linked' : 'None');
   status('sPlate', 'Closed');
+
+  // On this click, so the page carries a user gesture: Chrome will not let
+  // anything play with sound without one, and the player starts muted so that
+  // creating it here is allowed.
+  loadTracks();
+  loadYouTube();
+  await log('MUSIC', tracks.length ? tracks.length + ' TRACKS' : 'NONE LOADED', !tracks.length);
 
   await log('WAKE WORD', 'ARMED');
   await sleep(500);
@@ -541,9 +625,20 @@ function startListening(){
     // are JARVIS hearing his own voice - never dispatch those as commands.
     if (speaking) { tryInterrupt(text, true); return; }
 
-    // Identifies and logs. Nothing is gated on it yet, deliberately - the log
-    // has to show it is right before it is allowed to decide anything.
-    whoSpoke();
+    /* Identifies and logs. Whether anything is gated on it is cfg.gate's
+       business - see mayCommand. The take has to be consumed either way, or
+       the next phrase inherits these frames.
+
+       Except while a track plays, where the meter is deliberately not
+       collecting and there is no take to place. The difference between the two
+       ways of having no answer is the whole of it: null means the roster
+       looked and could not place this voice, and mayCommand refuses that;
+       undefined means there was never a fingerprint to have, which is the
+       keyword-interrupt path and is allowed. Passing null here made the helmet
+       refuse every command while music played - including "Jarvis, stop the
+       music", the one command that ends the state - and nothing short of a
+       reload got out of it. */
+    const who = musicOn ? undefined : whoSpoke();
 
     // The other half of the loop: once speech is cut off, the tail of his own
     // sentence still arrives as a final. Dispatching that is what let him
@@ -562,7 +657,7 @@ function startListening(){
       return;
     }
     if (barged){ barged = false; clearTimeout(bargedTimer); }
-    handleSpeech(text);
+    handleSpeech(text, who);
   };
   // Always restart - the mic is no longer stopped while speaking. After a run of
   // network failures, restarting instantly just hammers a service that is
@@ -641,10 +736,41 @@ let speakStartedAt = 0, spokenNow = '', abandonSpeech = false;
    The cost here is asymmetric. A missed interrupt means saying it twice; a
    false one means a loop, which is frightening rather than merely annoying.
    So this errs hard towards deciding something was his own voice. */
-let recentSpeech = '';        // outlives the utterance - echo lags behind it
+/* His words outlive the utterance, because the echo of them lags behind it.
+   Keeping ONE string was a single point of failure, and on 2026-08-28 it failed:
+   his whole reply came back as a final 1218 ms after a barge, was compared
+   against nothing, and was dispatched to the model - he answered himself.
+   Replaying that text through the real echoRun scores 1.000, so the comparison
+   was never the problem; the memory it compares against was empty. A second
+   stopSpeaking() erases it (spokenNow has already been cleared by the first),
+   and any path that speaks again narrows it to the newest line only.
+   So: a short history, appended to and never blanked. */
+const SPOKEN_MEMORY = 3;      // his last few lines, not just the last one
+let spokenHistory = [];
 let speechEndedAt = 0;
+
+function rememberSpoken(text){
+  if (!text) return;          // never let an empty write erase what he said
+  const last = spokenHistory[spokenHistory.length - 1];
+  // Each line is written once when it starts speaking and again when it ends,
+  // so without this the history holds one and a half distinct lines instead of
+  // three, and a scripted sequence like systemsCheck pushes out the line whose
+  // echo is still arriving. Refresh the timestamp rather than adding a copy:
+  // the end write is the one the window should be measured from.
+  if (last && last.text === text){ last.at = performance.now(); return; }
+  spokenHistory.push({ text, at: performance.now() });
+  while (spokenHistory.length > SPOKEN_MEMORY) spokenHistory.shift();
+}
 const ECHO_MEMORY_MS = 2500;  // how long his words could still be arriving
 const ECHO_TAIL_MS = 900;     // his audio is still in the air after cancel()
+/* Except after an interruption, where it has to last as long as the armed
+   window does. Arming for 8 s was measured, not guessed - Chrome finalises well
+   after the speaker stops - but the same lateness applies to the segment
+   carrying JARVIS's own tail, and an armed window with no words to compare
+   against would dispatch that tail as a command and let him answer himself.
+   Being deaf to a command that repeats his own phrasing for those few seconds
+   is the cheaper mistake by a wide margin. */
+let echoCompareUntil = 0;
 
 const words = s => s.toLowerCase().replace(/[^a-z0-9\s]/g,' ').split(/\s+/).filter(Boolean);
 
@@ -674,8 +800,26 @@ function isEcho(text, afterBarge){
   // Keeping them indefinitely made him deaf to any command that repeated
   // something he had just said - asking for "battle mode" shortly after
   // "Battle mode. Weapons hot." looked exactly like an echo of it.
-  const against = speaking ? spokenNow : (since < ECHO_MEMORY_MS ? recentSpeech : '');
-  return against ? echoRun(text, against) >= 0.5 : false;
+  const now = performance.now();
+  const live = speaking ? [spokenNow]
+    : spokenHistory.filter(h => now - h.at < ECHO_MEMORY_MS || now < echoCompareUntil)
+                   .map(h => h.text);
+  if (!live.length) return false;
+
+  const best = live.reduce((m, spoken) => Math.max(m, echoRun(text, spoken)), 0);
+  if (best >= 0.5) return true;
+  // The one line that would have explained the 2026-08-28 loop on sight: what
+  // it compared against, and how close it came, at the moment it decided to let
+  // something through with an interruption still live.
+  // Keyed on the comparison window, not on `barged`: that flag clears after
+  // BARGE_LIVE_MS while the barge arm now runs ARM_BARGE_MS, so the 5782 ms
+  // final that motivated the longer window would have arrived with `barged`
+  // already false and logged nothing at all - the line silent over most of the
+  // span it exists to explain.
+  if (afterBarge || performance.now() < echoCompareUntil)
+    console.log('[JARVIS] not his voice: best run ' + Math.round(best * 100) +
+                '% against ' + live.length + ' recent line' + (live.length === 1 ? '' : 's'));
+  return false;
 }
 
 /* Last-resort circuit breaker. If the guards above are ever defeated - a voice
@@ -733,6 +877,13 @@ function bargeStorm(){
 const BARGE_MARGIN_DB = 20;      // above the floor his own voice sits at
 const BARGE_FLOOR_MIN = -70;     // clamp the learned floor into a sane window so
 const BARGE_FLOOR_MAX = -50;     // a silent room cannot arm a hair trigger
+/* Everything that reasons about the floor uses the clamped value. The learner
+   used the raw one for a while, which meant that in a loud room - a car, a
+   television - its lower bound could climb above the barge threshold's upper
+   one, the sampling band closed, and the pitch profile silently reverted to the
+   onset frames this whole exercise exists to stop trusting. */
+const clampedFloor = () =>
+  bargeFloor === null ? null : Math.min(Math.max(bargeFloor, BARGE_FLOOR_MIN), BARGE_FLOOR_MAX);
 const BARGE_ABS_MIN   = -42;     // and never arm below this, whatever the floor
 const BARGE_HOLD_MS   = 250;     // sustained voice, not a door closing
 
@@ -796,6 +947,58 @@ const PITCH_MIN_HZ  = 70, PITCH_MAX_HZ = 400;
 const PITCH_TOL     = 0.12;  // within 12% of his own pitch counts as him
 let   meterRate = 48000, pitchBuf = null, ncBuf = null;
 let   jarvisF0 = 0, f0Samples = [];
+/* His pitch is learnt across the whole utterance, not just its first 400 ms.
+   Sampling only the settle window read him at 73-96 Hz through a session where
+   voices-test.html measured him at about 204 Hz: an utterance opens low and
+   unstable, and a gate calibrated on the onset is not defending against him at
+   the pitch he actually speaks. The detector itself was cleared of the blame -
+   fed synthetic saw and missing-fundamental voices at 83 to 325 Hz it reads
+   every one of them true, so this was always about which frames it saw.
+
+   Not every frame: autocorrelation over 150 lags at 60 fps is real work on a
+   phone, and 10 Hz is far more resolution than a median needs. And never a
+   frame loud enough to be somebody talking over him - those are the frames the
+   gate exists to judge, and folding an interrupter's pitch into his own
+   profile would teach him to ignore exactly the voice he should hear. */
+/* Above the floor, or it is the room. On 2026-08-28 the settled median came
+   back at 78-92 Hz across a whole session while voices-test.html measures him
+   at about 204: with his peak at -54 dB and the floor at -70, nearly every
+   frame sat under the barge threshold, so "settled samples" meant near-silence
+   and the gate was profiling rumble rather than JARVIS. His leakage runs 8-16
+   dB over the floor, so that is where he is. */
+const F0_OVER_FLOOR_DB = 8;
+const F0_SAMPLE_MS = 100;
+const F0_SAMPLE_MAX = 200;    // a very long line cannot grow this without bound
+const F0_MIN_SAMPLES = 3;
+let   lastF0SampleAt = 0, f0Onset = [];
+
+const medianOf = a => { const q = a.slice().sort((x, y) => x - y); return q[q.length >> 1]; };
+
+/* The onset samples are kept apart from the rest, and this is the point of the
+   whole change: they are the ones measuring 73-96 Hz for a voice that lives at
+   about 204. Mixed into one median they outvote the truth for the first second
+   of every utterance - three of them publish a profile an octave low, and while
+   that profile stands his own leakage does not look like him and the gate can
+   fire on it.
+
+   They are not thrown away, because they may be all there is. The canceller
+   puts him below the activity floor once it converges - three attempts to
+   enrol him through it collected zero voiced frames - so on some utterances the
+   onset leak is the only part of him that is periodic at all. So: prefer the
+   settled samples, fall back to the onset, and say in the log which it was. */
+function learnJarvisPitch(inSettle, db){
+  const now = performance.now();
+  if (now - lastF0SampleAt < F0_SAMPLE_MS) return;
+  const fl = clampedFloor();
+  if (fl !== null && db < fl + F0_OVER_FLOOR_DB) return;
+  lastF0SampleAt = now;
+  const f = pitchHz();
+  if (!f || railed(f)) return;      // a railed read is not a measurement
+  const bucket = inSettle ? f0Onset : f0Samples;
+  if (bucket.length < F0_SAMPLE_MAX) bucket.push(f);
+  if (f0Samples.length >= F0_MIN_SAMPLES)      jarvisF0 = medianOf(f0Samples);
+  else if (f0Onset.length >= F0_MIN_SAMPLES)   jarvisF0 = medianOf(f0Onset);
+}
 
 /* Autocorrelation, on a box-averaged decimation of the same frame the level
    came from. Returns 0 for anything unvoiced - which usefully means a door
@@ -875,6 +1078,12 @@ const ROSTER_MARGIN    = 0.05;   // closer than this between first and second is
 const ROSTER_PITCH_TOL = 0.35;   // and the pitch has to be plausible for that person
 const VOICE_ACTIVE_DB  = -45;    // quieter than this is not someone talking to us
 const TAKE_MIN_FRAMES  = 12;
+/* How many unrailed frames a phrase needs before its pitch is allowed to veto
+   an identification. On 2026-08-28 the single word "jarvis." came back at
+   286 Hz against an enrolled 148 - close to exactly double, which is what
+   autocorrelation does on a word too short to settle - and the pilot was
+   ignored. Six frames is 100 ms of voiced audio at the meter's rate. */
+const F0_MIN_PITCHED = 6;
 const TAKE_GAP_MS      = 1200;   // silence this long ends a phrase
 
 let meterFreq = null, melFilters = [], melEnergy = null;
@@ -943,10 +1152,22 @@ function finishTake(take){
   for (let b = 0; b < MFCC_N; b++){ c[b] /= take.vecs.length; norm += c[b] * c[b]; }
   norm = Math.sqrt(norm);
   for (let b = 0; b < MFCC_N; b++) c[b] /= norm;
-  const p = take.pitches.slice().sort((a, b) => a - b);
-  return { v: Array.from(c, x => +x.toFixed(4)), f0: +p[p.length >> 1].toFixed(1),
-           frames: take.vecs.length };
+  // f0 of 0 means "not measured", and identify() skips the pitch check rather
+  // than failing it. Better to decide a short phrase on timbre alone than to
+  // veto it on a number the detector never really produced.
+  const p = take.pitches.filter(f => !railed(f)).sort((a, b) => a - b);
+  return { v: Array.from(c, x => +x.toFixed(4)),
+           f0: p.length >= F0_MIN_PITCHED ? +p[p.length >> 1].toFixed(1) : 0,
+           frames: take.vecs.length, pitched: p.length };
 }
+
+/* The detector rails: an unvoiced sibilant is periodic enough to pass the 0.4
+   test and correlates best at the shortest lag it is allowed, which returns
+   PITCH_MAX_HZ exactly. On 2026-08-28 the single word "jarvis." came back at
+   400 Hz and the pilot was refused by his own helmet, on a phrase the timbre
+   had identified as him with a margin of 0.104. A number sitting on the rail is
+   the detector saying it does not know, and it must not be read as if it did. */
+const railed = f => f >= PITCH_MAX_HZ * 0.98 || f <= PITCH_MIN_HZ * 1.02;
 
 const cosine = (a, b) => { let s = 0; for (let i = 0; i < a.length; i++) s += a[i] * b[i]; return s; };
 
@@ -960,6 +1181,25 @@ function saveRoster(){ store.set('roster', JSON.stringify(roster)); }
 /* Against the best-matching take, not an averaged centroid. Averaging takes
    recorded on different days blurs them together; the nearest one is what
    actually decides. */
+/* How alike are somebody's own enrolment takes? Different words, different
+   days, same voice - so this is the score a genuine match from that person can
+   be expected to reach, measured from their own data rather than fixed in
+   advance. The roster's own finding was that absolute similarity carries almost
+   no information (a correct take scored 0.635 while the runner-up was 0.162
+   away), which rules out a constant threshold but not a self-calibrating one. */
+function cohesion(p){
+  if (!p || p.takes.length < 2) return 0;      // nothing to calibrate against
+  let worst = 1;
+  for (let i = 0; i < p.takes.length; i++)
+    for (let j = i + 1; j < p.takes.length; j++)
+      worst = Math.min(worst, cosine(p.takes[i].v, p.takes[j].v));
+  return worst;
+}
+// Correct calls in the 2026-08-28 log scored 0.818 to 0.948 against enrolment
+// takes recorded weeks earlier, so a phrase is allowed to fall somewhat short
+// of the enrolment takes' own agreement before it stops being plausible.
+const AMBIG_SLACK = 0.9;
+
 function identify(take){
   if (!roster.length) return null;
   const ranked = roster.map(p => {
@@ -973,12 +1213,47 @@ function identify(take){
 
   const top = ranked[0], second = ranked[1] || null;
   const margin = second ? top.s - second.s : 1;
-  const pitchOff = top.f0 ? Math.abs(take.f0 - top.f0) / top.f0 : 0;
+  // Either side can be unmeasured: a short phrase now, or an enrolment take
+  // recorded before this. Without two numbers there is no comparison to make.
+  const fits = c => !(c.f0 > 0 && take.f0 > 0) ||
+                    Math.abs(take.f0 - c.f0) / c.f0 <= ROSTER_PITCH_TOL;
+  const comparable = top.f0 > 0 && take.f0 > 0;
+  const pitchOff = comparable ? Math.abs(take.f0 - top.f0) / top.f0 : 0;
 
-  const sure = margin >= ROSTER_MARGIN && pitchOff <= ROSTER_PITCH_TOL;
+  const sure = margin >= ROSTER_MARGIN && fits(top);
+
+  /* Two people who live together sound alike: on 2026-08-28 "tell me another
+     one" came back with SKS 0.005 ahead of Shree and was thrown away as an
+     unrecognised voice - twice in a row, from the pilot, on a command he had
+     just been answered on. The roster exists to keep strangers out, not to
+     decide which member of the household is talking, so when everyone still in
+     contention is enrolled AND allowed, that question does not need answering.
+     Fail-open by construction: a stranger who lands between two enrolled voices
+     is admitted. That is the trade, and it is the right way round for a helmet
+     that otherwise ignores the child wearing it. */
+  /* ...but leniency about WHICH of them it is must not become leniency about
+     whether it is any of them. A stranger who happens to sit between two
+     enrolled voices ranks first by default, with a tiny margin, and would
+     otherwise be waved through on exactly the rule written for the household.
+     So the take also has to be a plausible one for somebody in contention. */
+  // Somebody enrolled with a single take has no cohesion to measure against,
+  // and treating that as "plausible" would switch the stranger guard off for a
+  // whole roster of one-take people. It has to be an affirmative answer from
+  // somebody who can actually answer, so an uncalibrated contender abstains and
+  // the ambiguity is simply not admitted. Three takes is what the UI asks for.
+  const plausible = c => {
+    const coh = cohesion(roster.find(p => p.name === c.name));
+    return coh > 0 && c.s >= coh * AMBIG_SLACK;
+  };
+  const near = ranked.filter(r => top.s - r.s < ROSTER_MARGIN);
+  const ambiguous = !sure && near.length > 1 &&
+                    near.every(c => c.allow) && near.some(fits) &&
+                    near.some(plausible);
+
   return { name: sure ? top.name : null, candidate: top.name, allow: top.allow,
            score: top.s, margin, pitchOff, f0: take.f0,
-           second: second ? second.name : null, sure };
+           second: second ? second.name : null, sure,
+           ambiguous, near: near.map(c => c.name) };
 }
 
 /* Consumes the phrase just heard and says who it belonged to. */
@@ -988,12 +1263,14 @@ function whoSpoke(){
   if (!t) return null;
   const id = identify(t);
   if (!id) return null;
-  console.log('[JARVIS] voice: ' + (id.sure ? id.name : 'unknown') +
+  console.log('[JARVIS] voice: ' + (id.sure ? id.name
+                                  : id.ambiguous ? id.near.join(' or ') : 'unknown') +
     ' (closest ' + id.candidate + ' ' + id.score.toFixed(3) +
     (id.second ? ', over ' + id.second : '') +
     ', margin ' + id.margin.toFixed(3) +
-    ', ' + Math.round(id.f0) + ' Hz vs their ' + Math.round(
-      roster.find(p => p.name === id.candidate).takes[0].f0) + ' Hz)');
+    ', ' + (id.f0 ? Math.round(id.f0) + ' Hz' : 'pitch not measured') + ' vs their ' +
+    Math.round(roster.find(p => p.name === id.candidate).takes[0].f0) + ' Hz' +
+    (id.f0 ? '' : ' - decided on timbre alone') + ')');
   return id;
 }
 
@@ -1010,27 +1287,43 @@ function meterTick(){
   const db = levelDb();
   // While he is quiet, gather what we hear so the roster can say whose it was.
   // While he talks, the only question is whether somebody is talking over him.
-  if (!speaking){ collectVoiced(db); return; }
-  if (cfg.barge === 'off' || bargeFired) return;
+  /* Music is a loudspeaker in the same room as the microphone, and nothing
+     downstream can tell a song from a person. Sung audio is voiced and well
+     over VOICE_ACTIVE_DB, so collecting it would (a) refresh heardLastAt every
+     frame, so TAKE_GAP_MS silence never arrives and the take never ends, and
+     (b) hand identify() a fingerprint of the song. No fingerprint is the
+     honest answer here, and every path already handles not having one. */
+  if (!speaking){ if (!musicOn) collectVoiced(db); return; }
+  /* And the gate comes down entirely. Ducked music at 12% is a continuous
+     pitched source sitting in exactly the band learnJarvisPitch samples, so
+     jarvisF0 would become the median of the song rather than of him - and
+     soundsLikeJarvis() would then mis-answer in the dangerous direction, with
+     his own leakage no longer matching the profile and a loud passage able to
+     fire interruptNow on himself. bargeFloor moves with the music too, so the
+     threshold derived from it has no measurement behind it. Nothing here is
+     salvageable while a track plays; it is suspended, not adjusted. */
+  if (cfg.barge === 'off' || bargeFired || musicOn) return;
 
   if (db > bargePeak) bargePeak = db;
   if (bargeFloor === null || db < bargeFloor) bargeFloor = db;
 
   // The canceller has not converged during the first syllable and the onset
-  // leaks. Learn the floor - and his pitch - through the settle window; never
-  // fire inside it, because he is the only one we can be sure is talking.
+  // leaks. Learn the floor through the settle window; never fire inside it,
+  // because he is the only one we can be sure is talking - which is also why
+  // his pitch is sampled here unconditionally.
   if (performance.now() - speakStartedAt < SETTLE_MS){
-    const f = pitchHz();
-    if (f) f0Samples.push(f);
+    learnJarvisPitch(true, db);
     return;
   }
-  if (!jarvisF0 && f0Samples.length >= 3){
-    const s = f0Samples.slice().sort((a, b) => a - b);
-    jarvisF0 = s[s.length >> 1];        // median: one bad frame cannot skew it
-  }
 
-  const floor = Math.min(Math.max(bargeFloor, BARGE_FLOOR_MIN), BARGE_FLOOR_MAX);
-  const threshold = Math.max(floor + BARGE_MARGIN_DB, BARGE_ABS_MIN);
+  const threshold = Math.max(clampedFloor() + BARGE_MARGIN_DB, BARGE_ABS_MIN);
+
+  // Past the settle window, keep learning him from the quiet frames only. This
+  // is a filter, not a proof: the threshold sits around -30 dB and a person
+  // talking over him measured -34, so a second voice under the trigger level
+  // does still feed his profile. It fails towards missing an interrupt rather
+  // than towards firing on him, which is the direction to fail in.
+  if (db <= threshold) learnJarvisPitch(false, db);
 
   if (db > threshold){
     // Loud enough - but is it a voice, and is it his? Only run the detector
@@ -1082,7 +1375,22 @@ function interruptNow(how){
   // wake word, and silently dropped it - so it had to be said all over again
   // (session log 2026-08-27). Armed, not latched: a false barge must not turn
   // the next thing said in the room into a command, so the window expires.
-  armForCommand('the interruption', BARGE_LIVE_MS);
+  // Measured, not guessed: on 2026-08-28 a real interruption logged
+  // "armed window expired (the interruption)" before the speaker's final ever
+  // arrived, so the command was dropped exactly as it was before any of this.
+  // The gate fires a quarter-second into the phrase and Chrome does not
+  // finalise until well after the speaker stops, which put the final more than
+  // BARGE_LIVE_MS away. A second real interruption, on 2026-08-29, finalised
+  // 5782 ms after the gate fired - 72% of the wake-word window, against 1218 ms
+  // the run before. Two samples that far apart do not bound anything, so the
+  // barge path took its own longer window rather than betting on 8 s.
+  //
+  // What that would have cost, and no longer does: a window this long used to
+  // outlive the echo comparison, and the transcript most likely to arrive late
+  // is his own tail - which is how he ends up answering himself. The line below
+  // is what makes the long arm safe, not roster gating, which ships off.
+  armForCommand('the interruption', ARM_BARGE_MS);
+  echoCompareUntil = performance.now() + ARM_BARGE_MS;   // his words stay comparable for as long
 }
 
 /* Push-to-interrupt. Always available regardless of the toggle, because it
@@ -1118,13 +1426,21 @@ function tryInterrupt(text, andDispatch){
   stopSpeaking();
   heardEl.textContent = text;
   chirp();
-  if (andDispatch) setTimeout(() => handleSpeech(text), 60);
+  // undefined, not null: nothing was measured here at all. The meter only
+  // collects while he is quiet, so an interruption has no fingerprint by
+  // construction - see mayCommand, which must not report this as "too short".
+  if (andDispatch) setTimeout(() => handleSpeech(text, undefined), 60);
   return true;
 }
 
 /* ---------- wake word ---------- */
 /* Speech engines mangle "Jarvis" in fairly predictable ways. */
 const WAKE = /\b(jarvis|jervis|javis|jarviss|jaris|service|charvis)\b/;
+
+/* The same name without the loose variants, for use while music is playing.
+   `service` is a known false trigger on ordinary speech, and a song is three
+   minutes of ordinary speech that nobody in the room is responsible for. */
+const WAKE_STRICT = /\b(jarvis|jervis|javis|jarviss)\b/;
 
 /* Being armed - waiting for a command with no wake word - has to expire. It
    used to latch until something was dispatched, so after a bare "Jarvis" the
@@ -1133,18 +1449,75 @@ const WAKE = /\b(jarvis|jervis|javis|jarviss|jaris|service|charvis)\b/;
    thought you paused in the middle of, short enough that the room does not
    inherit the microphone. */
 const ARM_MS = 8000;
+
+/* The barge window is the one that was measured, and it needed more room. On
+   2026-08-28 a real interruption finalised 1218 ms after the gate fired; on
+   2026-08-29, in the same room, 5782 ms - 72% of ARM_MS on a single sample, a
+   4.7x spread between two runs of the same thing. Chrome decides when a phrase
+   has ended and nothing here can hurry it. So the barge path gets its own,
+   longer window rather than raising both: a wake word is somebody pausing
+   mid-thought, where 8 s is generous, and every second of that window is a
+   second in which the room can speak into a live microphone. */
+const ARM_BARGE_MS = 12000;
+
+/* A reply he can answer without saying the name again - the thing the helmet
+   most obviously lacked on the 2026-08-29 run, where every follow-up
+   ("can you ask him something?") was dropped because arming is single-shot and
+   dispatch() disarms. Shorter than either of the above, and *weak*: see
+   armForCommand. A conversation turn is a much weaker claim about who is
+   talking than a wake word or an interruption, so it buys less. */
+const FOLLOWUP_MS = 6000;
+
 let armTimer = 0;
 
-/* The barge path passes BARGE_LIVE_MS rather than the full window. A barge that
-   fired on the television arms him with nobody having addressed him, so that
-   window is held down to the one in which `barged` is still set and the whole
-   interruption is still live. The full 8 s stays on the wake-word path, where a
-   human demonstrably spoke to him. */
-function armForCommand(why, ms){
+/* Both of these are declared below the block check.mjs lifts into its sandbox,
+   and must stay there: a top-level `let` inside a vm script is lexically scoped
+   to that script, so the sandbox's own writes to it are ignored and every
+   assertion resting on the flag passes without testing anything. That is not
+   hypothetical - the strong/weak assertions were doing exactly that until the
+   declarations were moved out. check.mjs asserts the lifted source is still
+   free of them.
+
+   Strong arms (wake word, interruption) say somebody addressed him directly.
+   A weak arm (the follow-up) only says he just finished answering, and the room
+   may have been talking over the whole exchange. mayCommand() waives the
+   fingerprint requirement for the first and not the second. */
+let armStrong = false;
+let wantFollowUp = false;   // set by handleSpeech(), refreshed by every finish()
+
+/* Does the exchange just dispatched earn a window to be answered back in?
+
+   Placed to a known voice, and it chains: each answered turn opens the next,
+   which is what a conversation is. "Placed" includes an ambiguity between
+   enrolled voices, matching what mayCommand() admits below - two people who
+   live together score within 0.005 of each other, and refusing to chain there
+   would single out the household this was built for. Otherwise it lasts
+   exactly one turn: the wake word or the interruption that started it is
+   spent, and saying the name again is the price of a second. That bound is
+   what stops the window sustaining itself - without it every reply re-armed,
+   and a room that kept talking held an armed microphone indefinitely, which is
+   the opposite of what armForCommand()'s expiry exists to guarantee. It is
+   also the *only* protection when the roster is empty, because then nothing
+   can be identified at all. */
+function earnsFollowUp(who, wasStrong){
+  return (who && (who.sure || who.ambiguous)) ? true : wasStrong;
+}
+
+/* The two paths no longer share a window - see ARM_BARGE_MS. The barge path was
+   held to BARGE_LIVE_MS for a while, on the reasoning that a barge which fired
+   on the television arms him
+   with nobody having addressed him - but a real interruption on 2026-08-28
+   logged "armed window expired" before the speaker's own final arrived, so the
+   short window simply dropped the command it existed to catch. What guards the
+   longer one is echoCompareUntil above: his own words stay comparable for
+   exactly as long as he stays armed. */
+function armForCommand(why, ms, weak){
   awaitingCommand = true;
+  armStrong = !weak;
   clearTimeout(armTimer);
   armTimer = setTimeout(() => {
     awaitingCommand = false;
+    armStrong = false;
     console.log('[JARVIS] armed window expired (' + why + ') - wake word needed again');
     // Only repaint if he is actually listening: this fires 8 s later, by which
     // time Settings may be open (which stops the recogniser) or the mic may
@@ -1153,11 +1526,147 @@ function armForCommand(why, ms){
   }, ms || ARM_MS);
 }
 
-function disarm(){ awaitingCommand = false; clearTimeout(armTimer); }
+function disarm(){ awaitingCommand = false; armStrong = false; clearTimeout(armTimer); }
 
-function handleSpeech(text){
+/* Roster gating. Two failure modes, and they are not symmetrical: refusing his
+   voice makes the helmet useless, while accepting the television makes it
+   unpredictable. So this only ever rejects on positive evidence - a voice that
+   was identified and is switched off, or one the roster looked at and could not
+   place. It never rejects for want of a fingerprint, because a short command
+   ("open up") can finish before TAKE_MIN_FRAMES of voiced audio exist, and
+   going deaf to the shortest commands is exactly the wrong trade.
+
+   Room chatter is ignored in silence - answering it is what makes a helmet feel
+   haunted. Somebody who said his name is clearly addressing him, though, and
+   silence there reads as broken, so that one gets a spoken refusal. Rate
+   limited, because a room with a television in it would otherwise hear it on a
+   loop. */
+const REFUSE_MS = 30000;   // keep in step with lastRefusalAt's initial value
+// Not 0: performance.now() starts near zero, so a zero here would swallow the
+// first refusal of the page's life - which is the likeliest one of all, since
+// that is when somebody has just turned the toggle on to try it.
+let lastRefusalAt = -30000;
+
+function mayCommand(id, addressedHim, text){
+  /* Ahead of the gate deliberately, because this is not the gate.
+
+     cfg.gate ships as 'anyone' and returns true on the next line, so anything
+     written below it is inert on the build the helmet actually runs. The
+     follow-up window is open for FOLLOWUP_MS after *every* reply, and left
+     under that early return it meant six seconds of live microphone in which
+     any sentence in the room reached dispatch() - including the LOCAL regexes,
+     which move the faceplate. A window that frequent cannot be protected by a
+     setting that is off by default.
+
+     So: a weak arm never carries an unidentified voice. It only applies with a
+     roster to identify against and no wake word in the phrase - with the name
+     said, this was never leaning on the arm in the first place. An empty
+     roster cannot identify anyone at all, and there earnsFollowUp()'s one-turn
+     bound is the whole of the protection.
+
+     Two things it must not catch, both of them people it was written to
+     protect. `id.ambiguous` is admitted forty lines below, because SKS and
+     Shree live together and score within 0.005 of each other; rejecting it
+     here would refuse the pilot by his own household, and now with cfg.gate at
+     its default, so on devices that enrolled voices without ever turning the
+     gate on. And `id === undefined` is the keyword-interrupt path, which has
+     no fingerprint by construction - reachable whenever a weak arm is live and
+     the child says "stop" over a multi-line reply. */
+  if (awaitingCommand && !armStrong && !addressedHim && roster.length &&
+      id !== undefined && !(id && (id.sure || id.ambiguous))){
+    console.log('[JARVIS] follow-up window, but this voice is not the one he was ' +
+                'talking to - ignoring "' + text + '"');
+    return false;
+  }
+  if (cfg.gate !== 'roster') return true;
+  if (!roster.length) return true;        // nobody enrolled: exactly as before
+  if (id === undefined){
+    // The keyword-interrupt path. Known hole: with barge-in on, a voice set to
+    // Ignored can still reach dispatch() by interrupting him with a keyword.
+    // Closing it needs a fingerprint taken while he is talking, which is a
+    // mixture of two voices and not something the roster was measured on.
+    console.log('[JARVIS] interrupt keyword - nobody was identified on this path, allowed');
+    return true;
+  }
+  if (!id && !armStrong){
+    /* No fingerprint, and nobody armed. On 2026-08-28 two sentences of other
+       people's conversation reached the model, and the log says how: both
+       matched WAKE - "i will transfer it to jarvis" - on an utterance the
+       roster could not see, because the meter does not collect while he is
+       talking. So a bare wake word cannot be the exemption here; it is the
+       thing being exploited, and `service` is a known false trigger besides.
+
+       Being armed is different in kind: the arm was set either by an utterance
+       that already passed this gate, or by an interruption, and an interruption
+       has no fingerprint by construction. That is the allowance a short command
+       actually needs. The cost is that "Jarvis, open up" shouted from across
+       the room while he is mid-sentence now needs saying twice.
+
+       The follow-up window does not qualify. It is set by him having just
+       been answered, not by anyone having addressed him, and it is live for
+       exactly the seconds when the room is most likely to be talking - so
+       waiving the fingerprint there would hand the microphone to whoever
+       spoke next. A follow-up has to be identified to count. */
+    console.log('[JARVIS] no fingerprint and nobody strongly armed - ignoring "' + text + '"');
+    return false;
+  }
+  if (!id){
+    if (!meterRunning)
+      console.warn('[JARVIS] the gate is on but the level meter is not running - ' +
+                   'nothing can be identified, so nothing is being gated');
+    else
+      console.log('[JARVIS] no fingerprint for "' + text + '" - too short to gate, allowed');
+    return true;
+  }
+  const entry = id.sure ? roster.find(p => p.name === id.name) : null;
+  if (entry && entry.allow !== false) return true;
+  if (id.ambiguous){
+    console.log('[JARVIS] ' + id.near.join(' or ') +
+                ' - too close to call, and all of them are listened to');
+    return true;
+  }
+
+  // whoSpoke() has already logged the scores this decision rests on.
+  console.log('[JARVIS] ignored ' +
+    (entry ? entry.name + ', who is switched off' : 'an unrecognised voice') +
+    ': "' + text + '"');
+
+  const now = performance.now();
+  if (addressedHim && now - lastRefusalAt > REFUSE_MS){
+    lastRefusalAt = now;
+    wantFollowUp = false;   // a refusal is not an exchange to follow up on
+    speak('I only listen to my pilot.');
+  }
+  return false;
+}
+
+function handleSpeech(text, who){
   heardEl.textContent = text;
+
+  /* While a track plays, only his name gets through.
+
+     Everything the song sings arrives here as a final, and LOCAL contains
+     "open up", "lights off" and "battle mode" - so a lyric is one regex away
+     from moving the faceplate with nobody having spoken. Arms are not honoured
+     either: an arm is a claim about who is talking, and with the meter no
+     longer collecting there is nothing behind that claim. The strict wake
+     pattern is used rather than WAKE, because `service` false-triggers on
+     ordinary speech and a song is three minutes of it. */
+  if (musicOn && !WAKE_STRICT.test(text)){
+    console.log('[JARVIS] music is playing - ignoring "' + text + '" (needs his name)');
+    heardEl.textContent = text + ' — ignored';
+    return;
+  }
+
   const m = text.match(WAKE);
+  // disarm() clears armStrong before either dispatch below, and whether this
+  // turn was strongly armed is exactly what decides if it earns another.
+  const wasStrong = armStrong;
+
+  if (!mayCommand(who, !!m, text)){
+    heardEl.textContent = text + ' — ignored';   // never silently nothing
+    return;                                          // leaves any armed window alone
+  }
 
   if (m){
     // Words can sit either side of the name — "jarvis, open up" but equally
@@ -1168,7 +1677,7 @@ function handleSpeech(text){
     const after  = text.slice(m.index + m[0].length).replace(/^[\s,.]+/, '');
     const rest   = (after || before).trim();
 
-    if (rest.length > 1){ disarm(); dispatch(rest); }
+    if (rest.length > 1){ disarm(); wantFollowUp = true; dispatch(rest); }
     else {
       console.log('[JARVIS] wake word only - armed, waiting for a command');
       armForCommand('wake word'); setState('Listening', 'listening'); chirp();
@@ -1177,17 +1686,263 @@ function handleSpeech(text){
   }
   if (awaitingCommand){
     disarm();
-    // The delta is the number that settles whether BARGE_LIVE_MS is long
+    // The delta is the number that settles whether ARM_BARGE_MS is long
     // enough: the gate fires ~BARGE_HOLD_MS into the interrupting phrase and
-    // the final for it lands only after the speaker stops. If a real
-    // interruption ever shows a delta near BARGE_LIVE_MS, the window is too
-    // tight and the 2026-08-27 dropped-command symptom will be back.
+    // the final for it lands only after the speaker stops. Read it on every
+    // run - 1218 ms on 2026-08-28, 5782 on 2026-08-29, which already exceeds
+    // BARGE_LIVE_MS and is why that is no longer the bound. If one ever lands
+    // near ARM_BARGE_MS the window is too tight and the 2026-08-27
+    // dropped-command symptom is back; raise it and echoCompareUntil together.
     console.log('[JARVIS] armed - taking this as a command' +
       (interruptedAt ? ' (' + Math.round(performance.now() - interruptedAt) +
                        ' ms after the interrupt)' : ''));
     interruptedAt = 0;
+    wantFollowUp = earnsFollowUp(who, wasStrong);
     dispatch(text);
+    return;
   }
+  /* Everything above returns; falling through to here used to be the one exit
+     with no log line at all, which is the failure mode this repo keeps
+     relearning - a dropped command and a quiet room look identical from the
+     outside. This is the ordinary case (the room, or him without the wake
+     word), so it is not a warning; it just has to be visible. */
+  console.log('[JARVIS] no wake word and not armed - ignoring "' + text + '"');
+}
+
+/* ---------- music ----------
+   THIS IS THE ONE FEATURE THAT DOES NOT SURVIVE THE NETWORK GOING DOWN.
+   Everything else routed locally works with the router off. This does not: the
+   commands are local, but the audio comes from YouTube. So every failure here
+   says so out loud, because a dead router that produces silence is
+   indistinguishable from a broken helmet, and he is seven.
+
+   A fixed list, exactly like the joke bank and for exactly the same reason: it
+   closes the door "play anything" would open. Nothing here is chosen by a
+   model, a search or a recommendation.
+
+   TRACKS ships empty on purpose. An eleven-character YouTube ID that nobody
+   checked is not a broken link, it is an unknown video playing inside a helmet
+   on a child's head - so these are somebody's deliberate choice, added by
+   editing this list or by pasting links into Settings, and never guessed. */
+const TRACKS = [
+  // { name: 'example', id: 'PUT_THE_11_CHAR_ID_HERE' },
+];
+
+/* Anything the parent pasted into Settings, appended to the list above. */
+let tracks = [];
+function loadTracks(){
+  let extra = [];
+  try { extra = JSON.parse(store.get('tracks', '[]')) || []; } catch(e){ extra = []; }
+  const seen = new Set();
+  tracks = TRACKS.concat(extra).filter(t => t && t.id && !seen.has(t.id) && seen.add(t.id));
+  if (tracks.length)
+    console.log('[JARVIS] music: ' + tracks.length + ' track' +
+                (tracks.length === 1 ? '' : 's') + ' - ' +
+                tracks.map(t => t.name).join(', '));
+}
+
+/* Accepts what a parent would actually paste: a watch URL, a share link, a
+   shorts link, an embed, or the bare id. Returns '' for anything else rather
+   than guessing - a wrong id here plays an unknown video. */
+function youtubeId(s){
+  const m = String(s).match(/(?:v=|youtu\.be\/|embed\/|shorts\/|live\/)([A-Za-z0-9_-]{11})/);
+  if (m) return m[1];
+  return /^[A-Za-z0-9_-]{11}$/.test(String(s).trim()) ? String(s).trim() : '';
+}
+
+/* One track per line, "name = link". Bad lines are handed back rather than
+   dropped: a playlist that silently lost half its entries is worse than one
+   that says which lines it could not read. */
+function parseTracks(text){
+  const out = [], bad = [];
+  String(text).split('\n').forEach(line => {
+    const t = line.trim();
+    if (!t) return;
+    const eq = t.indexOf('=');
+    if (eq < 0){ bad.push(t); return; }
+    const name = t.slice(0, eq).trim().toLowerCase();
+    const id   = youtubeId(t.slice(eq + 1));
+    if (!name || !id){ bad.push(t); return; }
+    out.push({ name, id });
+  });
+  return { out, bad };
+}
+
+/* 12% while he is being spoken to, because the helmet speaker and the phone
+   speaker are the same speaker. setVolume, not a GainNode: the audio is inside
+   a cross-origin iframe and there is no node to put a gain on. */
+const MUSIC_FULL = 100, MUSIC_DUCK = 12;
+let player = null, playerReady = false, musicOn = false, trackAt = 0;
+let musicFails = 0;   // consecutive player errors; see onError
+
+/* Created during boot() - a click - so the page has the user gesture Chrome
+   requires before anything may play with sound. It starts muted for the same
+   reason; unMute() later is allowed once that gesture exists. */
+function loadYouTube(){
+  if (window.YT || document.getElementById('ytapi')) return;
+  const s = document.createElement('script');
+  s.id = 'ytapi';
+  s.src = 'https://www.youtube.com/iframe_api';
+  s.onerror = () => console.log('[JARVIS] music: could not load the YouTube API - offline?');
+  document.head.appendChild(s);
+}
+
+window.onYouTubeIframeAPIReady = () => {
+  player = new YT.Player('tube', {
+    height: '90', width: '160',
+    playerVars: { playsinline: 1, controls: 0, rel: 0 },
+    events: {
+      onReady: () => {
+        playerReady = true;
+        player.mute();
+        console.log('[JARVIS] music: player ready');
+      },
+      onStateChange: e => {
+        // Advance ourselves rather than letting YouTube pick what comes next -
+        // "up next" is a recommendation, and a recommendation is exactly the
+        // door the fixed list exists to keep shut.
+        // A track that actually reached PLAYING clears the failure run, so a
+        // single bad id in the middle of a good list costs nothing later.
+        /* The one place musicOn becomes true without startTrack having shown
+           the player. It matters because startTrack can return early -
+           loadVideoById succeeding while unMute or setVolume throws leaves the
+           video loading and audible - and then PLAYING arrives, the helmet
+           goes name-only, and the only way out is the microphone the music is
+           talking over. The invariant is: musicOn true means the way out is on
+           screen. */
+        if (e.data === YT.PlayerState.PLAYING){
+          musicFails = 0; musicOn = true; showPlayer(true);
+        }
+        /* Paused - a stall, or the player deciding to stop - means the room is
+           quiet again, so stop requiring his name. Said out loud in the log
+           because "he stopped answering me" has to be diagnosable, and a
+           musicOn that outlives the sound is invisible from inside the helmet.
+           BUFFERING is deliberately not here: that is a stall mid-track and
+           the sound is coming back. */
+        if (e.data === YT.PlayerState.PAUSED && musicOn){
+          musicOn = false;
+          console.log('[JARVIS] music: paused - listening normally again');
+        }
+        if (e.data === YT.PlayerState.ENDED && musicOn) nextTrack(true);
+      },
+      /* Bounded, and quiet about it. Walking to the next track on an error is
+         right for one dead id and catastrophic for a condition that fails them
+         all - a router that went down mid-session, a region block, a list
+         pasted wrong - because each failure starts the next, which fails. That
+         is an unbounded loop speaking a line of apology into a helmet on a
+         child's head, and with a one-track list it never even moves on. So:
+         count consecutive failures, stop after one pass, and say it once. */
+      onError: e => {
+        // An error can arrive after "stop the music". Restarting there would
+        // undo the one command he gave.
+        if (!musicOn) return;
+        musicFails++;
+        console.log('[JARVIS] music: player error ' + e.data +
+                    ' on "' + (tracks[trackAt] || {}).name + '" (' + musicFails + ')');
+        if (musicFails >= Math.min(tracks.length || 1, 3)){
+          musicOn = false;
+          musicFails = 0;
+          showPlayer(false);
+          speak('The music will not play just now, sir.');
+          return;
+        }
+        nextTrack(true);
+      }
+    }
+  });
+};
+
+/* The player and its tap target appear and disappear together. Anything else
+   leaves either a dead box over the gear or a visible player nothing can
+   dismiss. */
+function showPlayer(on){
+  const t = $('tube'), b = $('tubeStop');
+  if (t) t.style.left = on ? '12px' : '-9999px';
+  if (b) b.style.display = on ? 'block' : 'none';
+}
+
+function musicReady(){
+  if (playerReady) return true;
+  console.log('[JARVIS] music: asked for, but the player is not ready');
+  speak(navigator.onLine
+    ? 'The music player is still waking up, sir. Try again in a moment.'
+    : 'We are offline, sir. The music comes over the network, and it is not there.');
+  return false;
+}
+
+/* "play the dinosaur song" -> "dinosaur". The suffix is what made the command
+   unambiguous in the first place, so it comes off before the lookup. */
+function trackNameFrom(c){
+  const m = String(c).match(/(?:play|put on) (?:the |some |my )?(.+?) (?:song|track)\b/);
+  return m ? m[1] : '';
+}
+
+function playMusic(name){
+  if (!tracks.length){
+    console.log('[JARVIS] music: nothing in the list');
+    speak('I have no music loaded, sir. Add some in settings.');
+    return;
+  }
+  if (!musicReady()) return;
+  let i = 0;
+  if (name){
+    const want = name.trim().toLowerCase();
+    i = tracks.findIndex(t => t.name === want);
+    if (i < 0) i = tracks.findIndex(t => t.name.includes(want) || want.includes(t.name));
+    if (i < 0){
+      console.log('[JARVIS] music: nothing called "' + want + '"');
+      speak('I do not have that one, sir.');
+      return;
+    }
+  }
+  trackAt = i;
+  startTrack(false);
+}
+
+function startTrack(auto){
+  const t = tracks[trackAt];
+  if (!t) return;
+  musicOn = true;
+  // Whatever the meter had collected belongs to the room before the music. It
+  // is about to stop collecting; leaving a half-built take behind would let it
+  // be attributed to whoever speaks next.
+  heardTake = null;
+  try {
+    player.loadVideoById(t.id);
+    player.unMute();
+    // Ducked from the first frame if he is mid-sentence, so a track never
+    // starts at full volume over the top of him.
+    player.setVolume(speaking ? MUSIC_DUCK : MUSIC_FULL);
+  } catch (err){
+    console.log('[JARVIS] music: could not start "' + t.name + '": ' + err.message);
+    speak('The music will not start, sir.');
+    return;
+  }
+  showPlayer(true);
+  console.log('[JARVIS] music: "' + t.name + '" (' + t.id + ')' + (auto ? ' - auto' : ''));
+  if (!auto) speak('Playing ' + t.name + '.');
+}
+
+function nextTrack(auto){
+  if (!tracks.length || !playerReady) return;
+  trackAt = (trackAt + 1) % tracks.length;
+  startTrack(auto);
+}
+
+function stopMusic(){
+  musicOn = false;
+  musicFails = 0;
+  showPlayer(false);
+  if (playerReady){ try { player.stopVideo(); } catch(e){} }
+  console.log('[JARVIS] music: stopped');
+  speak('Music off.');
+}
+
+/* Called from speakAwait and from stopSpeaking, so the duck follows the actual
+   speaking state rather than being restored on a timer. */
+function duckMusic(down){
+  if (!playerReady || !musicOn) return;
+  try { player.setVolume(down ? MUSIC_DUCK : MUSIC_FULL); } catch(e){}
 }
 
 /* ---------- commands that never touch the network ---------- */
@@ -1200,8 +1955,199 @@ const LOCAL = [
   { re:/stealth/,             run:() => mode('STEALTH','Stealth engaged. Running quiet.','var(--azure)','Stealth') },
   { re:/power down|shut down|stand down/, run:() => mode('OFF','Powering down. Rest well.','var(--cyan)','Standby') },
   { re:/charge (the )?repulsors?/, run:() => mode('CHARGE','Repulsors charging. Stand clear.','var(--cyan-hot)','Charging') },
-  { re:/systems? check|diagnostics|suit status/, run:systemsCheck }
+  { re:/systems? check|diagnostics|suit status/, run:systemsCheck },
+  /* Music. The decision is local; the sound is not. These sit on LOCAL because
+     what they must never do is go to the model to be interpreted - "play the
+     dinosaur song" reaching a 3B model is how you get a different song. */
+  { re:/(stop|turn off|kill|no more)( the| that)? (music|song)|music off/, run:() => stopMusic() },
+  { re:/(next|skip)( the| this)? (song|track)|skip (it|this)/, run:() => nextTrack(false) },
+  { re:/play (the |some |my )?music|put (some |the )?music on|music on/, run:() => playMusic('') },
+  /* Named tracks must say "song" or "track". A bare "play X" catch-all would
+     swallow "play a game" and "play rock paper scissors" and answer them with
+     "I do not have that one" - hijacking every sentence starting with "play"
+     to a feature that owns four of them. */
+  { re:/(play|put on) (the |some |my )?.+ (song|track)\b/, run:(c) => playMusic(trackNameFrom(c)) }
 ];
+
+/* ---------- live facts, between LOCAL and the model ----------
+   Weather comes from Open-Meteo: no key, no signup, and it answers with
+   Access-Control-Allow-Origin: *, so the page fetches it directly - no Caddy
+   route to add, and nothing secret in this file.
+
+   Deliberately NOT a model tool-call. A 3B model's function calling is not
+   dependable enough to put in front of a child, and the failure mode is not a
+   missing answer, it is a confidently invented one. A regex either matches or
+   it does not; when it does, the numbers come from the API and the sentence is
+   assembled here from a fixed vocabulary, so the model is not in the path at
+   all and contentOK() has nothing to catch.
+
+   Behind cfg.live, defaulted off - the toggle is what changes today's
+   behaviour, not this list. With it off these questions fall through to the
+   model exactly as they do now, which means a plausible invented answer. That
+   is worth knowing when deciding whether to turn it on. */
+const LIVE = [
+  /* `not` keeps explanations away from the forecast. "What is rain", "why does
+     it rain" and "how does a jacket keep you warm" are questions for the model;
+     answering them with a percentage would be a non-sequitur, not an answer.
+     The weather entry below needs no such guard - "what is the weather" is
+     exactly the question it is for. */
+  { re: /\b(rain|raining|umbrella|wellies|welly|coat|jacket)\b/,
+    not: /^(what|why|how) (is|are|does|do|come)\b/,
+    run: (q) => weather(q, 'rain') },
+  { re: /\b(weather|temperature|forecast|sunny|snowing)\b|how (hot|cold|warm) is it/,
+    run: (q) => weather(q, 'now') }
+];
+
+/* WMO weather codes in words he actually uses. Calm on purpose: the WMO's own
+   wording for 82 and 99 is "violent" and "heavy hail", and he hears these
+   through a helmet on his head. Nothing here is frightening and nothing here
+   is wrong - "thundery with hail" is the same fact, said kindly. */
+const SKY = {
+  0:'clear', 1:'mostly clear', 2:'partly cloudy', 3:'cloudy',
+  45:'foggy', 48:'foggy',
+  51:'drizzling', 53:'drizzling', 55:'drizzling steadily',
+  56:'drizzling and freezing', 57:'drizzling and freezing',
+  61:'raining lightly', 63:'raining', 65:'raining hard',
+  66:'raining and freezing', 67:'raining and freezing',
+  71:'snowing lightly', 73:'snowing', 75:'snowing hard',
+  77:'snowing lightly',
+  80:'showery', 81:'showery', 82:'showery and heavy',
+  85:'snowing in showers', 86:'snowing in showers',
+  95:'thundery', 96:'thundery with a little hail', 99:'thundery with hail'
+};
+function skyPhrase(code){ return SKY[code] || 'hard to read from here'; }
+
+/* What to put on before going out. Ordered by what matters most: cold beats
+   rain, because being cold is the thing he will not tell anyone about. */
+function kitAdvice(t, rain){
+  if (t <= 4)     return 'Wrap up warm - hat and gloves.';
+  if (rain >= 50) return 'Take a coat with a hood.';
+  if (t <= 12)    return 'A coat, I think.';
+  if (t >= 26)    return 'Hat and water, and keep to the shade.';
+  return 'No coat needed.';
+}
+
+/* Spoken, not read: "a 82 percent chance" is wrong out loud even though it
+   looks fine on the page. An eight, an eleven, an eighteen, an eighty-something. */
+function article(n){
+  return (n === 8 || n === 11 || n === 18 || (n >= 80 && n <= 89)) ? 'An' : 'A';
+}
+
+/* Pure, so check.mjs can decide it against synthetic readings - including the
+   extremes a real day will not produce this week. Two or three sentences, no
+   markdown, ASCII only: everything here is spoken aloud, never read. */
+function weatherLine(w, intent, place){
+  const here = place ? ' in ' + place : '';
+  const t    = Math.round(w.tempC);
+  const rain = Math.max(0, Math.min(100, Math.round(w.rainPct || 0)));
+  if (intent === 'rain'){
+    const lead = rain >= 70 ? 'Very likely, sir'
+               : rain >= 30 ? 'Possibly, sir'
+               : 'Probably not, sir';
+    return lead + '. ' + article(rain) + ' ' + rain + ' percent chance of rain today' + here +
+           ', and it is ' + t + ' degrees. ' + kitAdvice(t, rain);
+  }
+  return 'It is ' + t + ' degrees and ' + skyPhrase(w.code) + here + ', sir. ' +
+         kitAdvice(t, rain);
+}
+
+const WX_TTL_MS = 600000;      // ten minutes; the sky does not move faster
+let wxCache = null;            // { at, lat, lon, w }
+
+/* Every live call is bounded. A fetch with no timeout that never settles
+   leaves setState('Thinking') on the HUD forever with nothing said, which is
+   the silence-that-looks-like-working failure this repo keeps meeting. */
+async function fetchJSON(url, ms){
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), ms);
+  try {
+    const r = await fetch(url, { signal: ac.signal });
+    if (!r.ok) throw new Error('http ' + r.status);
+    return await r.json();
+  } finally { clearTimeout(timer); }
+}
+
+function haveLocation(){ return !!(cfg.lat && cfg.lon); }
+
+/* One prompt, then it is stored. Geolocation needs a secure context, which the
+   helmet already has - the microphone would not work without one either. */
+function locate(){
+  return new Promise((resolve, reject) => {
+    if (!navigator.geolocation) return reject(new Error('no geolocation here'));
+    navigator.geolocation.getCurrentPosition(
+      pos => {
+        cfg.lat = pos.coords.latitude.toFixed(3);
+        cfg.lon = pos.coords.longitude.toFixed(3);
+        store.set('lat', cfg.lat); store.set('lon', cfg.lon);
+        console.log('[JARVIS] location fixed at ' + cfg.lat + ', ' + cfg.lon);
+        resolve();
+      },
+      err => reject(new Error(err.message || 'refused')),
+      { timeout: 8000, maximumAge: 3600000 });
+  });
+}
+
+function wxUrl(){
+  return 'https://api.open-meteo.com/v1/forecast?latitude=' + encodeURIComponent(cfg.lat) +
+         '&longitude=' + encodeURIComponent(cfg.lon) +
+         '&current=temperature_2m,weather_code' +
+         '&daily=precipitation_probability_max&timezone=auto&forecast_days=1';
+}
+
+async function weather(question, intent){
+  setState('Thinking');
+  if (!haveLocation()){
+    try { await locate(); }
+    catch (err){
+      console.log('[JARVIS] no location: ' + err.message);
+      speak('I do not know where we are, sir. Set our location in settings.');
+      return;
+    }
+  }
+  try {
+    const now = performance.now();
+    const fresh = wxCache && wxCache.lat === cfg.lat && wxCache.lon === cfg.lon &&
+                  now - wxCache.at < WX_TTL_MS;
+    let w;
+    if (fresh){
+      w = wxCache.w;
+      console.log('[JARVIS] weather from cache');
+    } else {
+      const d = await fetchJSON(wxUrl(), 6000);
+      // A 200 with a shape we did not expect would otherwise be spoken as
+      // "It is NaN degrees". Same named failure path as a dead network.
+      if (!d.current || !Number.isFinite(d.current.temperature_2m))
+        throw new Error('no temperature in the reply');
+      w = { tempC:   d.current.temperature_2m,
+            code:    d.current.weather_code,
+            rainPct: ((d.daily && d.daily.precipitation_probability_max) || [0])[0] || 0 };
+      wxCache = { at: now, lat: cfg.lat, lon: cfg.lon, w };
+      console.log('[JARVIS] weather: ' + w.tempC + ' C, code ' + w.code +
+                  ', rain ' + w.rainPct + '%');
+    }
+    speak(weatherLine(w, intent, cfg.place));
+  } catch (err){
+    // Named, because "he said nothing" and "the weather service was slow" look
+    // identical from the helmet and only one of them is worth chasing.
+    console.log('[JARVIS] weather failed: ' + err.message);
+    speak(navigator.onLine
+      ? 'I cannot reach the weather station just now, sir.'
+      : 'We are offline, sir. I cannot see the sky from here.');
+  }
+}
+
+/* Settings accepts a town name or a bare "lat, lon". The name is resolved by
+   Open-Meteo's geocoder - same terms, no key - and only ever on a Save tap,
+   never on the speaking path. */
+async function resolvePlace(text){
+  const m = text.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (m) return { lat: m[1], lon: m[2], label: '' };
+  const d = await fetchJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&name=' +
+                            encodeURIComponent(text), 6000);
+  const hit = d.results && d.results[0];
+  if (!hit) throw new Error('no such place');
+  return { lat: hit.latitude.toFixed(3), lon: hit.longitude.toFixed(3), label: hit.name };
+}
 
 function dispatch(command){
   abandonSpeech = false;   // fresh command, so stop abandoning lines
@@ -1211,6 +2157,19 @@ function dispatch(command){
   for (const c of LOCAL){
     if (c.re.test(command)) { console.log('[JARVIS] local command: "' + command + '"'); c.run(); return; }
   }
+  /* After LOCAL, so nothing offline is ever traded for something that needs
+     the network, and before ask(), so a question with a real answer never
+     reaches a model that would invent one. */
+  if (cfg.live === 'on'){
+    for (const c of LIVE){
+      if (c.re.test(command) && !(c.not && c.not.test(command))){
+        console.log('[JARVIS] live: "' + command + '"');
+        c.run(command);
+        return;
+      }
+    }
+  }
+
   console.log('[JARVIS] -> model: "' + command + '"');
   ask(command);
 }
@@ -1589,10 +2548,11 @@ let currentUtterance = null;
 function stopSpeaking(){
   currentUtterance = null;          // claim first: the end event fires later
   speaking = false;
-  recentSpeech = spokenNow;         // keep it: the echo of it is still arriving
+  rememberSpoken(spokenNow);        // keep it: the echo of it is still arriving
   speechEndedAt = performance.now();
   spokenNow = '';
   speechSynthesis.cancel();
+  duckMusic(false);
   setState('Standby', 'listening');
 }
 
@@ -1609,14 +2569,15 @@ function speakAwait(text){
     currentUtterance = u;
     speaking = true;
     spokenNow = text.toLowerCase();
-    recentSpeech = text.toLowerCase();
+    rememberSpoken(spokenNow);
     speakStartedAt = performance.now();
     setState('Speaking', 'speaking');
+    duckMusic(true);
 
     // Per-utterance, because the floor is learned fresh each time - the room,
     // the distance and the canceller's convergence all move between sentences.
     bargeFloor = null; bargeAboveSince = 0; bargePeak = -Infinity; bargeFired = false;
-    jarvisF0 = 0; f0Samples = []; bargeF0 = 0;   // his pitch is relearnt each time
+    jarvisF0 = 0; f0Samples = []; f0Onset = []; lastF0SampleAt = 0; bargeF0 = 0;   // relearnt each time
 
     // This is now the normal path: the mic sleeps while he talks, so it cannot
     // hear itself and no feedback loop is possible.
@@ -1632,18 +2593,44 @@ function speakAwait(text){
       if (cfg.barge === 'on' && bargePeak > -Infinity && bargeFloor !== null)
         console.log('[JARVIS] utterance: floor ' + bargeFloor.toFixed(1) +
                     ' dB, peak ' + bargePeak.toFixed(1) + ' dB, his pitch ' +
-                    (jarvisF0 ? jarvisF0.toFixed(0) + ' Hz' : 'not measured') + ', ' +
+                    (jarvisF0 ? jarvisF0.toFixed(0) + ' Hz from ' +
+                       (f0Samples.length >= F0_MIN_SAMPLES
+                          ? f0Samples.length + ' settled samples'
+                          : f0Onset.length + ' onset samples only') : 'not measured') + ', ' +
                     (bargeFired ? 'FIRED at ' + bargeF0.toFixed(0) + ' Hz' : 'no barge'));
       // Superseded or already stopped: resolve so any awaiting sequence
       // unblocks, but leave the newer utterance's state alone.
       if (currentUtterance === u){
         currentUtterance = null;
         speaking = false;
-        recentSpeech = spokenNow;   // echo of it keeps arriving for a moment
+        rememberSpoken(spokenNow);  // echo of it keeps arriving for a moment
         speechEndedAt = performance.now();
         spokenNow = '';
         setState('Standby', 'listening');
+        duckMusic(false);
         if (!wantListening) startListening();
+
+        /* The follow-up arm. Only for an exchange handleSpeech() decided had
+           earned one, never after a refusal or a stray line, and never over a
+           strong arm - an interruption has already said more about who is
+           talking than this can, and its window is longer.
+
+           Refreshed rather than consumed. A reply can be several utterances -
+           systemsCheck speaks six through say() - and clearing the flag on the
+           first of them armed a window that expired around line three, while
+           he was still talking, leaving nothing armed when the sequence
+           actually ended. The last line is the one the window should start
+           from, and only the next dispatch or refusal clears the flag. */
+        if (wantFollowUp && !abandonSpeech && !(awaitingCommand && armStrong)){
+          armForCommand('the reply he just gave', FOLLOWUP_MS, true);
+          // Same rule that makes the barge arm safe: while he is armed his own
+          // words must stay comparable, or the tail of the very line that
+          // armed him comes back as the follow-up and he answers himself.
+          // Never shortened - a barge may already have pushed this further out
+          // than the follow-up would, and moving it earlier would reopen the
+          // loop for the remainder of that longer window.
+          echoCompareUntil = Math.max(echoCompareUntil, performance.now() + FOLLOWUP_MS);
+        }
       }
       resolve();
     };
@@ -1717,6 +2704,10 @@ function openPanel(){
   $('pModel').value = cfg.model;
   $('pKey').value = cfg.key;
   $('pBarge').value = cfg.barge;
+  $('pGate').value = cfg.gate;
+  $('pLive').value = cfg.live;
+  $('pTracks').value = tracks.map(t => t.name + ' = ' + t.id).join('\n');
+  $('pPlace').value = cfg.place || (cfg.lat ? cfg.lat + ', ' + cfg.lon : '');
   $('pEndpoint').placeholder = DEFAULTS[cfg.provider].endpoint;
   $('pModel').placeholder = DEFAULTS[cfg.provider].model;
   renderVoices();
@@ -1731,9 +2722,25 @@ function renderVoices(){
   roster.forEach((p, i) => {
     const row = document.createElement('div');
     row.className = 'vrow';
-    const f0 = Math.round(p.takes.reduce((a, t) => a + t.f0, 0) / p.takes.length);
+    const pitched = p.takes.filter(t => t.f0 > 0);
+    const f0 = pitched.length
+      ? Math.round(pitched.reduce((a, t) => a + t.f0, 0) / pitched.length) : 0;
     row.innerHTML = '<div><b>' + p.name + '</b> <em>' + p.takes.length + ' take' +
-      (p.takes.length === 1 ? '' : 's') + ' · about ' + f0 + ' Hz</em></div>';
+      (p.takes.length === 1 ? '' : 's') + ' · ' +
+      (f0 ? 'about ' + f0 + ' Hz' : 'no pitch - re-record') + '</em></div>';
+    // Per person, because "he knows this voice" and "he takes orders from it"
+    // are different questions - a sibling can be enrolled so he is recognised
+    // in the log without being able to drive the faceplate.
+    const allow = document.createElement('button');
+    allow.className = 'ghost';
+    allow.textContent = p.allow === false ? 'Ignored' : 'Listens';
+    allow.onclick = () => {
+      p.allow = p.allow === false;
+      saveRoster(); renderVoices();
+      console.log('[JARVIS] roster: ' + p.name + ' is now ' +
+                  (p.allow === false ? 'ignored' : 'listened to'));
+    };
+    row.appendChild(allow);
     const del = document.createElement('button');
     del.className = 'ghost';
     del.textContent = 'Remove';
@@ -1766,6 +2773,17 @@ $('pVoiceRec').addEventListener('click', () => {
     const t = finishTake(heardTake);
     heardTake = null; enrolling = false; btn.disabled = false;
     if (!t){ stage.textContent = 'Not enough voiced audio - talk continuously, a little louder.'; return; }
+    // A take whose every pitch read railed carries no pitch, and identify()
+    // skips the veto whenever either side is unmeasured - so accepting one here
+    // would quietly switch off that person's only guard against a timbre
+    // near-miss, for every phrase from then on. Refuse it instead of storing it.
+    if (!t.f0){
+      stage.textContent = 'No usable pitch in that take - say a few words rather than one, ' +
+                          'and keep away from the microphone hiss. Nothing was saved.';
+      console.warn('[JARVIS] enrolment rejected for "' + name + '": ' + t.frames +
+                   ' frames but no unrailed pitch');
+      return;
+    }
 
     let p = roster.find(x => x.name.toLowerCase() === name.toLowerCase());
     if (!p){ p = { name, allow: true, takes: [] }; roster.push(p); }
@@ -1795,6 +2813,44 @@ $('pSave').addEventListener('click', () => {
   cfg.key = $('pKey').value.trim();
   cfg.voice = $('pVoice').value;
   cfg.barge = $('pBarge').value;
+  cfg.gate = $('pGate').value;
+  cfg.live = $('pLive').value;
+  const parsed = parseTracks($('pTracks').value);
+  /* The textarea shows the whole list, TRACKS included, because that is what
+     is useful to look at. Only the ones not already hardcoded are stored, or
+     every open-and-save cycle would append the file's own entries to the saved
+     extras and the list would grow without bound. */
+  const inFile = new Set(TRACKS.map(t => t.id));
+  store.set('tracks', JSON.stringify(parsed.out.filter(t => !inFile.has(t.id))));
+  loadTracks();
+  if (parsed.bad.length)
+    console.log('[JARVIS] music: could not read ' + parsed.bad.length +
+                ' line(s): ' + parsed.bad.join(' | '));
+  /* Resolved off the speaking path, on a Save tap, and never blocking the
+     panel from closing: a geocoder that is slow or down must not make Settings
+     feel broken. Blank means fall back to the phone's own fix. */
+  const placeText = $('pPlace').value.trim();
+  if (!placeText){
+    // Blank means "ask the phone again", so the old fix has to go with the
+    // name - otherwise haveLocation() stays true and he keeps reporting the
+    // last town's weather without saying which town it is.
+    cfg.place = ''; cfg.lat = ''; cfg.lon = '';
+    wxCache = null;
+  } else if (placeText !== cfg.place){
+    resolvePlace(placeText).then(r => {
+      cfg.lat = r.lat; cfg.lon = r.lon; cfg.place = r.label || placeText;
+      ['lat','lon','place'].forEach(k => store.set(k, cfg[k]));
+      wxCache = null;   // a new place invalidates the old sky
+      console.log('[JARVIS] location set to ' + (cfg.place || 'those coordinates') +
+                  ' (' + cfg.lat + ', ' + cfg.lon + ')');
+    }).catch(err => {
+      // Spoken, not just logged: the panel has already closed and looks as
+      // though it worked, and the next weather question would answer for
+      // wherever he was standing before.
+      console.log('[JARVIS] could not place "' + placeText + '": ' + err.message);
+      speak('I could not find that place, sir. The location is unchanged.');
+    });
+  }
   bargeOffUntil = 0; bargeLog = [];   // clear any tripped circuit breaker
   Object.keys(cfg).forEach(k => store.set(k, cfg[k]));
   status('sUplink', (cfg.key || cfg.provider === 'ollama') ? 'Ready' : 'Offline',

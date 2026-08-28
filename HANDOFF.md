@@ -1,63 +1,100 @@
 # Handoff
 
-**Item:** Phase 2b — post-interruption dropped command **fixed in code, unverified on a real run**, then roster gating.
-**State:** `check.mjs` green (12 checks). JS parses. Reviewer (opus) returned APPROVED after two rounds.
+**Item:** Phases 3 (weather) and 4 (music), both written, gates green, **never run in a
+browser.**
+**State:** `node check.mjs` → 26 checks. JS parses. Everything uncommitted.
+
+Three unverified bodies of work now sit in one tree: the arming/follow-up work from earlier
+today (reviewer APPROVED), Phase 3, and Phase 4 (reviewer APPROVED on round 4, after
+CHANGES_REQUESTED three times).
 
 ---
 
-## What changed in `index.html`
+## 1. Phase 4 — music
 
-**The bug:** after a barge-in, the interrupting command was silently dropped — `handleSpeech()`
-only acts on a WAKE match or `awaitingCommand`, and after an interruption neither held, so the
-utterance fell off the end of the function with no log line.
+A fixed `TRACKS` list of YouTube ids driven by `LOCAL` commands. `TRACKS` **ships empty**: a
+guessed eleven-character id is not a broken link, it is an unknown video playing inside a
+helmet on a child's head. Add ids by editing the list or pasting links into Settings →
+**Music**, one per line as `name = link`. Named tracks must say "song" or "track" ("play the
+dinosaur song"), because a bare `play X` catch-all swallowed "play a game".
 
-- `interruptNow()` now arms him for a command. Somebody who has just cut in is addressing him.
-- Arming goes through `armForCommand(why, ms)` / `disarm()` with an expiry, closing the
-  "`awaitingCommand` latches forever" debt rather than widening it. 8 s (`ARM_MS`) on the
-  wake-word path; `BARGE_LIVE_MS` (5 s) on the barge path, the same constant that now drives
-  `bargedTimer`, so the armed window and the tail-guard relaxation cannot drift apart.
-- Expiry logs a line and repaints Standby only when `!speaking && wantListening`.
-- **Separate bug the review caught:** `stopSpeaking()` nulls `currentUtterance`, so the
-  utterance's own `finish()` skipped its `startListening()`. With barge-in **off** — the
-  shipped default — the mic had been stopped for the speech, so a spacebar interrupt left the
-  helmet deaf until reload while the HUD read "Standby / listening". `interruptNow()` now
-  restarts recognition.
+**`musicOn` gates the entire listening path, and this is the safety rule of the phase.** A
+loudspeaker three inches from the microphone means every lyric arrives as a final, and `LOCAL`
+contains `open up`, `lights off` and `battle mode`. While a track plays:
 
-## Next step: verify on a real run — Kiran only, the gates cannot see this
+- the meter stops collecting fingerprints (`startTrack()` also drops any half-built take);
+- the level and pitch gates are **suspended outright**, so barge-in does not work during music
+  — `bargeFloor` and `jarvisF0` would otherwise become properties of the song;
+- `handleSpeech()` requires `WAKE_STRICT` (no `service`, a known false trigger) and honours no
+  arms, because an arm is a claim about who is talking and nothing knows that any more;
+- `onresult` passes **`undefined`**, never `null`. `null` means "the roster refused this
+  voice", and passing it there made the helmet refuse *every* command including "stop the
+  music", with no way out but a reload. `check.mjs` asserts the caller, not just the contract.
 
-Barge-in on, interrupt him mid-sentence. Expected log:
+Escape hatch that is not voice: a **STOP MUSIC** button beside the player, bottom-left. It
+ships hidden and appears only while something is playing. Neither box goes near `#gear`
+(bottom-right) any more - an overlay there swallowed every press on it, and `#gear` is the only
+way into Settings. The player is 200x200 because that is YouTube policy's minimum, and the stop
+button sits beside it rather than over it because a transparent div across a playing video is
+the "obscured" case the same policy calls out.
 
-```
-barge-in: ... / interrupted by level
-ignored own voice: "..."  /  that was his tail - still waiting for the interruption
-armed - taking this as a command (NNNN ms after the interrupt)
--> model: "..."
-```
+**Unverified assumption, and the first thing to check in a browser:** the player is parked
+off-screen when idle rather than `display:none`, because a `YT.Player` built inside a hidden
+container may never reach `onReady` - and if it does not, `playerReady` stays false and every
+request answers "the music player is still waking up" for the life of the page. The console
+logs `music: player ready` when it works.
 
-with **no** `wake word only - armed` line in between.
+## 2. Phase 3 — weather
 
-**Read the NNNN.** That delta is the open question the reviewer raised and neither of us can
-settle without audio: the level gate fires ~250 ms into the interrupting phrase, but Chrome's
-final for it only lands after the speaker stops, so it could plausibly run to 3–4 s. If it ever
-approaches `BARGE_LIVE_MS` (5000), the window is too tight and the dropped-command symptom is
-back — and the fix then is to keep the arm alive while `barged` is set rather than simply
-lengthening it, because an arm that outlives the echo guard lets a false barge (the television)
-dispatch a sentence nobody addressed to him.
+`LIVE` list between `LOCAL` and `ask()`, behind `cfg.live`, defaulted off. Not a model
+tool-call — the numbers come from Open-Meteo and the sentence is assembled from a fixed
+vocabulary. Entries may carry a `not` that keeps explanations ("what is rain") out of the
+forecast. Location is geolocation-once or a town name typed in Settings. Verified from
+PowerShell against the live API: field names and `Access-Control-Allow-Origin: *` on both
+hosts. It says `An 82 percent`, not `A 82` — it is spoken, never read.
 
-Also watch for `armed window expired (...)` appearing where a command was expected.
+## 3. The run these need
+
+**Music, and do this one first — it is the one with a helmet on a head.**
+
+1. Add two or three tracks in Settings. Boot log should read `MUSIC 2 TRACKS`.
+2. "Play some music." Then **say ordinary things while it plays** and watch the log fill with
+   `music is playing - ignoring "..."`. Read what it ignored — that is the first measurement
+   of what a song actually transcribes as, and the assumption the whole rule rests on.
+3. "Jarvis, stop the music" must work. If it does not, that is the trap from round 2 back
+   again — check for `no fingerprint and nobody strongly armed` in the log.
+4. **Hold the gear.** Settings must open, with music playing and with it stopped.
+5. Tap **STOP MUSIC**: music stops.
+6. Watch for `music: player ready` in the console at boot. If it never appears, the off-screen
+   player never initialised and every music request will say he is still waking up.
+
+**Weather.** Turn Live answers on, set a location. Ask; expect `live:` then `weather:` then an
+answer. Ask again inside ten minutes for `weather from cache`. **Then turn the wifi off and
+ask again** — expect `weather failed:` and a calm spoken line, not silence and not a hang.
+
+**Arming**, still outstanding from earlier today: read `(NNNN ms after the interrupt)` — 1218
+and 5782 ms so far, and near 12000 means `ARM_BARGE_MS` and `echoCompareUntil` both need
+raising together. Count `follow-up window, but this voice is not the one he was talking to`.
+
+## 4. What to be suspicious of
+
+Three of this session's fixes each introduced a new blocking bug, every one caught by review
+rather than by the checks: a rule written below `mayCommand`'s `cfg.gate` short-circuit and so
+inert on the shipped build; a fingerprint rule that refused the pilot by his own household; a
+null identification that trapped the music on; an overlay that swallowed the gear. **In this
+area the fixes are where the bugs are, not the features.**
+
+**Mutation-test every new check before believing it.** Four checks written this session passed
+without testing anything until they were flipped and confirmed to fail — one because a `let`
+inside the lifted block shadowed the sandbox global, one because a regex's escapes had been
+mangled into literal backspace characters, and two because the sandbox's gate was set to a
+value that refused the input before the rule under test could run.
 
 ## Then
 
-Phase 2b roster gating, unchanged — see `BACKLOG.md` §3.
+Phase 5 — space and science news. `BACKLOG.md` §3. Needs a `handle /feeds/*` block in the
+Caddyfile, because RSS has no CORS.
 
-## Reviewer suggestions not acted on (both pre-existing, both reasonable)
+## Files touched this session
 
-- No automated coverage for the `isEcho`/`afterBarge` invariant. `check.mjs` already extracts
-  the `<script>` in memory, so `isEcho(tail, true) === true` for word-overlapping text plus an
-  arm-expiry case would pin both halves of this change.
-- `startMeter()` logs "level meter running" without checking `ctx.state`; a suspended
-  `AudioContext` yields constant −180 dB, which reads as a quiet room.
-
-## Files touched this run
-
-`index.html` only (plus this file and `BACKLOG.md`).
+`index.html`, `check.mjs`, `CLAUDE.md`, `BACKLOG.md`, `HANDOFF.md`. Nothing committed.

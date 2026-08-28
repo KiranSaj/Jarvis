@@ -27,6 +27,16 @@ them, and say why.
 - **Jokes come from the `JOKES` bank, never the model.** The model once offered
   him a joke about an astronaut breaking up with his girlfriend. Jokes are
   intercepted in `dispatch()` before any network call.
+- **Music silences the listening path (`musicOn`).** A loudspeaker three inches
+  from the microphone means everything a track sings arrives as a final, and
+  `LOCAL` contains `open up`, `lights off` and `battle mode` — a lyric is one
+  regex away from moving the faceplate with nobody having spoken. While a track
+  plays: the meter stops collecting fingerprints, the level and pitch gates are
+  suspended outright (`bargeFloor` and `jarvisF0` would otherwise become
+  properties of the song), and `handleSpeech()` requires `WAKE_STRICT` and
+  honours no arms. `onresult` must pass `undefined` for the speaker, never
+  `null` — `null` means "the roster refused this voice" and would trap him with
+  no way to stop the music. There is a non-voice exit: tap the player.
 - **Do not shorten the system prompt for latency.** It costs roughly 120 ms and
   has never been the bottleneck. It also carries the "never frightening,
   violent or unkind" instruction.
@@ -46,12 +56,21 @@ ESP32 (BLE Nordic UART)
   WS2812B    - eyes + arc reactor
 ```
 
-Voice commands split two ways in `dispatch()`:
+Voice commands split four ways in `dispatch()`, in this order:
 
 1. **Jokes** — served from the local bank, instant, no network.
 2. **`LOCAL` regexes** — helmet control (open, lights, battle mode). Instant, no
    network. This is what he uses most, so it must keep working offline.
-3. **Everything else** — goes to the model via `callModel()`.
+3. **`LIVE` regexes** — questions with a real answer (weather, from Open-Meteo).
+   Entries may carry a `not` that keeps explanations out of the forecast: "what
+   is rain" is a question for the model, and answering it with a percentage is a
+   non-sequitur rather than an answer.
+   Behind `cfg.live`, **defaulted off**. Deliberately a regex intercept and not a
+   model tool-call: a 3B model's function calling is not dependable enough to sit
+   in front of a child, and its failure mode is a confident invention rather than
+   a missing answer. The numbers come from the API and the sentence is assembled
+   from a fixed vocabulary, so the model is never in the path.
+4. **Everything else** — goes to the model via `callModel()`.
 
 ---
 
@@ -87,6 +106,13 @@ every gate left the helmet deaf for an evening: `SpeechRecognition.start(track)`
 was accepted and then returned nothing at all — no results, no errors. Neither
 `check.mjs` nor a syntax check can see that. Any change to the audio path must
 log what it decided and why *before* it is handed to anyone to test.
+
+**A `let` inside the block `check.mjs` lifts makes its assertions vacuous.** A
+top-level `let` in a `vm` script is lexically scoped to that script, so the
+sandbox writes to it are ignored and the binding keeps its initial value
+forever. `armStrong` was declared that way and every strong/weak assertion
+passed without testing anything. **Mutation-test a new check before believing
+it** - flip its expectation and confirm it fails.
 
 **Test pure audio functions in Node against synthetic signals.** Two real bugs
 were caught that way and neither was visible from inside the app: an
@@ -124,14 +150,29 @@ First-time LAN setup — certificates and firewall — is in `LAN-SETUP.md`.
   with "Access is denied", a PowerShell health check that reported a false
   failure because a cold `powershell.exe` times out doing proxy discovery.
 - **Prefer local commands over the model** where behaviour must be reliable.
-  Anything on the `LOCAL` list works with the network down.
+  Anything on the `LOCAL` list works with the network down — **except music**,
+  which is routed locally but whose audio comes from YouTube. It is the one
+  feature that does not survive the router going down, and every failure path in
+  it says so aloud, because silence and a dead router are indistinguishable from
+  inside a helmet.
+- **Music comes from the `TRACKS` list, never a search.** Joke-bank shape and
+  the same argument: it closes the door "play anything" would open. Tracks
+  advance on `ENDED` rather than letting YouTube choose, because "up next" is a
+  recommendation. **Never invent a video id** — a wrong eleven-character id is
+  not a broken link, it is an unknown video playing inside a helmet on a child's
+  head.
 - **Everything the model says is spoken aloud**, never read. Keep replies to two
   or three sentences, and strip markdown — `forSpeech()` does this because small
   models emit `**bold**` and `### headings` regardless of instructions.
 - **Test the joke bank and validator after editing either.** `node check.mjs`
   verifies no joke trips the validator, none repeat, none contain non-ASCII,
   that known-bad lines are still blocked, that ordinary science answers are
-  *not* blocked, and that every `LOCAL` command still routes offline. It reads
+  *not* blocked, and that every `LOCAL` command still routes offline. It also
+  lifts three audio-path functions into a sandbox — `mayCommand()`,
+  `pitchHz()` and `learnJarvisPitch()` — and decides them against synthetic
+  input, which is the only automated view of that path there is. It does the
+  same for the weather path: `weatherLine()` is pure, so every WMO code at
+  every temperature is decided offline against `contentOK()`. It reads
   the `<script>` out of `index.html` in memory and writes nothing.
   A `PostToolUse` hook in `.claude/settings.json` runs it automatically
   whenever `index.html` is edited, so it does not depend on anyone remembering.
@@ -226,8 +267,17 @@ Announce the switch out loud so the transcript records why.
   window outlasts Chrome's final for the interrupting phrase is unverified on a
   real run — see `HANDOFF.md`.
 - `service` is a wake-word variant and false-triggers on ordinary speech.
-- The voice roster identifies but does not gate anything yet, deliberately.
-- The JARVIS pitch gate is calibrated about an octave low, because it samples
-  only the settle window at the start of an utterance.
+- Roster gating is on `cfg.gate`, defaulted to "anyone", and has never run with a
+  second person in the room. The keyword-interrupt path bypasses it: no
+  fingerprint of an interruption exists, because the meter does not collect
+  while he is talking.
+- The pitch gate learns him from settled frames that are 8 dB or more over the
+  clamped floor, after a run where it profiled the room instead (78-92 Hz for a
+  ~204 Hz voice). Unconfirmed. Its remaining weakness is that the quiet-frame
+  filter is a filter and not a proof: a second voice under the barge threshold
+  still feeds his profile, which fails towards missing an interrupt rather than
+  firing on him.
+- A phrase with no usable pitch is identified on timbre alone, with no absolute
+  similarity floor. `decided on timbre alone` in the log marks every such call.
 - Cloud speech recognition drops out regularly (`recognition error: network`).
   The on-device model would fix it but Windows has no en-GB speech pack here.
