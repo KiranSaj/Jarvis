@@ -5,7 +5,7 @@ things that cost hours to learn. **This** file is the moving part: what is done,
 queued, what is blocked. A cold session should be able to read `HANDOFF.md` plus this file
 and continue without asking anything.
 
-**Last updated:** 2026-08-29 (Phases 3 and 4)
+**Last updated:** 2026-08-28 (first browser run: Phase 3 verified, player initialises)
 
 ---
 
@@ -15,9 +15,9 @@ and continue without asking anything.
 |---|---|
 | Branch | `main`. All work inline, no feature branches. |
 | Gates | `node check.mjs` → 26 checks passed (101 jokes, 6 block rules). JS parses. |
-| Runtime | Desktop Chrome 151 only, never the phone. Three runs on 2026-08-28 plus one on 2026-08-29. The 08-29 run confirmed the self-loop fix and produced the arm-timing measurement below. |
-| Current item | Phases 3 (weather) and 4 (music) both written, gates green, **never run in a browser**. The 2026-08-29 arming work is also still unverified. Three unverified bodies of work now sit in one tree. See `HANDOFF.md`. |
-| Blocked | On-device speech recognition (`"unavailable"` — Windows has no en-GB speech pack). Not blocking anything, just unavailable. |
+| Runtime | Desktop Chrome 151 only, never the phone. Three runs on 2026-08-28, one on 2026-08-29, plus a mic-free driven run on 2026-08-28 that exercised Phase 3 and the music plumbing through `dispatch()`. The 08-29 run confirmed the self-loop fix and produced the arm-timing measurement below. |
+| Current item | **Phase 3 (weather) verified in a browser** on 2026-08-28 — geocoder, live fetch, cache, the `not` rule and the failure path all exercised through `dispatch()`. **Phase 4 (music) is verified only as far as an empty `TRACKS` allows**: the player initialises and the no-tracks path speaks, but nothing has played. The arming work is still unverified. See `HANDOFF.md` for the run that remains. |
+| Blocked | Nothing. **On-device speech recognition is now `"available"`** as of the 2026-08-28 browser run — the en-GB pack arrived, and boot logs `recognition live on Chrome's own microphone, on-device model`. It was `"unavailable"` for every prior session, so every transcription measurement in this file predates the recogniser now in use. |
 
 ## 2. Done
 
@@ -141,9 +141,11 @@ individually and skip failures rather than dropping the batch.
   track playing, the gate is now suspended outright rather than adjusted, because `bargeFloor`
   and `jarvisF0` would both become properties of the song. That means **barge-in does not work
   while music plays** — deliberate, and worth knowing before wondering why.
-- **A `YT.Player` in a hidden container may never fire `onReady`.** The player is parked
-  off-screen when idle rather than `display:none`d for exactly this reason, but that it works
-  either way is unverified. `music: player ready` in the console at boot settles it.
+- ~~**A `YT.Player` in a hidden container may never fire `onReady`.**~~ Closed by the
+  2026-08-28 browser run: `music: player ready` appears at boot and `playerReady` is `true`.
+  Parking it off-screen works. Noted while confirming it — the line logs **twice** from one
+  `<iframe id="tube">`, so `onReady` fires twice on a single player. Harmless (it re-sets a
+  boolean); recorded because a duplicate player would not have been harmless.
 - **Three of this session's fixes each introduced a new blocking bug**, every one caught by
   review rather than by the checks: a rule written below `mayCommand`'s `cfg.gate`
   short-circuit and therefore inert; a fingerprint rule that refused the pilot by his own
@@ -151,12 +153,13 @@ individually and skip failures rather than dropping the batch.
   overlay that swallowed the gear. The pattern is worth naming — the fixes in this area are
   where the bugs are, not the features.
 
-- **Phase 3 has never fetched anything from inside the browser.** The response shape and
-  `Access-Control-Allow-Origin: *` are confirmed against the live API from PowerShell, and
-  `weatherLine()` is decided offline for every WMO code at every temperature — but nothing has
-  gone through `fetch()`, geolocation or the geocoder on the page itself. Geolocation in
-  particular has a permission prompt nobody has seen yet, and on the helmet it will appear over
-  the HUD.
+- ~~**Phase 3 has never fetched anything from inside the browser.**~~ Mostly closed by the
+  2026-08-28 browser run: the geocoder resolved a town name in 59 ms over real `fetch` with
+  CORS clean, the forecast fetched and spoke, a second ask hit `weather from cache`, the `not`
+  rule kept `what is rain` on the model path, and a forced `fetchJSON` throw produced
+  `weather failed:` plus a calm spoken line rather than silence. **Still unrun: `locate()`.**
+  The run set coordinates directly, so the geolocation permission prompt has still never been
+  seen — and on the helmet it will appear over the HUD.
 - **`cfg.live` off means weather questions still reach the model**, which answers them
   confidently and wrongly. That is today's behaviour and the toggle is what changes it, but
   "off" is not "he declines" — it is "he guesses".

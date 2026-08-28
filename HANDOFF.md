@@ -100,10 +100,50 @@ Caddyfile, because RSS has no CORS.
 
 `index.html`, `check.mjs`, `CLAUDE.md`, `BACKLOG.md`, `HANDOFF.md` — all in `0ead3fb`.
 
-## Session of 2026-08-28 (background job): nothing new run
+## Session of 2026-08-28 (background job): first browser run
 
-Gates re-run green (26 checks). Server confirmed up on `http://localhost:8000/` — a literal
-`localhost` origin, so the microphone, Web Bluetooth and wake-lock all work there; Docker/Caddy
-was not running. Ollama answering on :11434. **No browser run happened**: this session had no
-working Chrome automation, and the run §3 asks for needs a microphone and a speaker anyway.
-The list in §3 is still the next step, unchanged and untouched.
+Driven through Chrome on `http://localhost:8000/` (literal `localhost`, so a secure context).
+Gates green, 26 checks. Everything below was reached without a microphone, by calling
+`dispatch()` — the same entry point the voice path calls, so everything downstream of
+recognition is genuinely under test. Settings were changed **in memory only and never saved**;
+a reload restored the shipped defaults.
+
+**Settled — the off-screen player initialises.** `music: player ready` appears at boot and
+`playerReady` is `true`. Parking the `YT.Player` off-screen rather than `display:none` works.
+That was §1's "unverified assumption, and the first thing to check in a browser".
+
+**New, and it changes a Blocked row: on-device recognition is now `"available"`.** Boot logs
+`recognition live on Chrome's own microphone, on-device model`. The en-GB pack that Windows
+did not have has arrived on this machine. This is the fix for the recurring
+`recognition error: network` dropouts — but it means **every voice measurement taken before
+today was taken on a different recogniser**, so treat old transcription behaviour as stale.
+
+**Phase 3 is verified in a browser, end to end.** Geocoder resolved "London" in 59 ms over
+real `fetch` with CORS clean; `weather: 18.9 C, code 61, rain 85%`; a second ask logged
+`weather from cache`; `what is rain` logged `-> model:` and never reached the forecast, so the
+`not` rule holds; and with `fetchJSON` forced to throw, `weather failed:` printed and it spoke
+*"I cannot reach the weather station just now, sir."* — a calm named line, no silence, no hang,
+and the `navigator.onLine` arm chosen correctly. The spoken article rule is real: it said
+**"An 85 percent"**.
+
+**The gear is not swallowed.** `document.elementFromPoint()` at the gear's centre returns
+`#gear` both idle and with the `#tubeStop` box forced visible, and a press-and-hold opened
+Settings. The overlay bug from round 4 is genuinely fixed.
+
+**Music plumbing, as far as an empty list allows.** `play some music` with `TRACKS` empty logs
+`music: nothing in the list` and speaks *"I have no music loaded, sir. Add some in settings."*
+`play a game` logs `-> model:` and is **not** swallowed by the music matcher.
+
+**One new observation, benign:** `music: player ready` logs **twice** at boot from the same
+line. There is only one `<iframe id="tube">`, so it is a duplicate `onReady` on a single
+player, not two players — it only sets `playerReady = true` twice. Worth knowing, not worth
+fixing blind.
+
+### What is still unrun, and why
+
+Everything left needs a voice, a speaker, or a real YouTube id — and a guessed id is the one
+thing this repo will not do. Specifically: what a **song actually transcribes as** (the
+measurement the whole `musicOn` rule rests on), "Jarvis, stop the music", the gear **with music
+playing**, the STOP MUSIC button, and the `(NNNN ms after the interrupt)` arm timing. §3 below
+is still the script for that run; paste two or three links you have watched into Settings →
+Music first.
