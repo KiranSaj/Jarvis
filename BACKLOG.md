@@ -121,6 +121,30 @@ leave-one-out, tightest margin 0.073.
   than the harmonic spacing. Replaced with MFCCs; the DCT is what separates the vocal tract
   from the harmonic comb.
 
+### Three defects found and fixed on 2026-08-28, all in the music path
+
+- **`parseTracks` split a bare pasted link into a name and an id.** `youtube.com/watch?v=ID`
+  carries its own `=`, so splitting on the first one produced a track named
+  `https://www.youtube.com/watch?v` with a valid id — and, because the id parsed, the line
+  never reached `bad`. Three pasted links became three tracks with the same URL for a name,
+  which he then **read out loud** as the title. A URL-shaped left side is now treated as no
+  name at all and handed back. Bad lines are also **spoken** now, not only logged, on the same
+  reasoning the geocoder failure beside them already used: the panel has closed and looks as
+  though it worked.
+- **The player was built without `origin`.** Without it the player never received video
+  metadata at all — `getDuration()` stayed 0 for over four minutes — and, far worse, `onError`
+  **never fired**, so an unplayable video presented as an unbounded silent buffer. With
+  `origin: location.origin` the same three ids fail properly through the existing bounded
+  `musicFails` walk in under a second, and he says so aloud. This one line is the difference
+  between the designed failure path running and not running at all.
+- **Nothing bounded "the track never started".** `onStateChange` deliberately ignores BUFFERING
+  (a mid-track stall, where the sound is coming back), and `onError` cannot be relied on — it
+  did not fire once during the four-minute hang. A `MUSIC_START_MS` (20 s) guard now clears
+  `musicOn`, hides the player, stops the video and says one calm line if PLAYING never arrived.
+  Clearing `musicOn` is the point: otherwise the helmet stays name-only with the gates
+  suspended for a song nobody can hear. Verified both ways in the browser — it fires on a load
+  that never starts, and does **not** fire after a deliberate stop.
+
 ## 3. Queued
 
 **Phase 5 — space and science news.** NASA/ESA feeds, which avoid the trap a general news
@@ -137,15 +161,26 @@ individually and skip failures rather than dropping the batch.
   a song produces a stream of arbitrary finals. That is near-certain and completely unmeasured.
   The first run with music should simply watch how many
   `music is playing - ignoring "..."` lines appear per minute and what they contain.
+  **Still open after 2026-08-28**, and not for want of trying: the three tracks loaded that day
+  were official Marvel/VEVO uploads and every one returned **player error 150** — the rights
+  holder has disabled embedded playback — so no sound was ever produced. This measurement needs
+  tracks that actually embed. Check a candidate before adding it: an id that errors 150 will
+  never play in the helmet however the app is written.
+- **The `musicOn` gate itself is verified**, separately from the sound. With `musicOn` true,
+  `open up`, `lights off`, `battle mode`, `at your service`, `open up the faceplate now` and
+  `turn the lights off` were every one ignored — the faceplate never moved and nothing was
+  spoken. `jarvis stop the music` got through and stopped it. The gear stayed reachable
+  (`elementFromPoint` → `#gear`) with music on, and the STOP MUSIC button stopped playback on a
+  real click. So the rule holds against the phrases that make it dangerous; what is unmeasured
+  is only what a song actually transcribes as.
 - **Music and the level gate have never been in the same room.** With `cfg.barge='on'` and a
   track playing, the gate is now suspended outright rather than adjusted, because `bargeFloor`
   and `jarvisF0` would both become properties of the song. That means **barge-in does not work
   while music plays** — deliberate, and worth knowing before wondering why.
 - ~~**A `YT.Player` in a hidden container may never fire `onReady`.**~~ Closed by the
   2026-08-28 browser run: `music: player ready` appears at boot and `playerReady` is `true`.
-  Parking it off-screen works. Noted while confirming it — the line logs **twice** from one
-  `<iframe id="tube">`, so `onReady` fires twice on a single player. Harmless (it re-sets a
-  boolean); recorded because a duplicate player would not have been harmless.
+  Parking it off-screen works. (An earlier note here claimed `onReady` fired twice; that was
+  the console buffer replaying two boot sequences. On a clean boot it fires once.)
 - **Three of this session's fixes each introduced a new blocking bug**, every one caught by
   review rather than by the checks: a rule written below `mayCommand`'s `cfg.gate`
   short-circuit and therefore inert; a fingerprint rule that refused the pilot by his own

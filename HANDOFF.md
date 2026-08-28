@@ -134,16 +134,33 @@ Settings. The overlay bug from round 4 is genuinely fixed.
 `music: nothing in the list` and speaks *"I have no music loaded, sir. Add some in settings."*
 `play a game` logs `-> model:` and is **not** swallowed by the music matcher.
 
-**One new observation, benign:** `music: player ready` logs **twice** at boot from the same
-line. There is only one `<iframe id="tube">`, so it is a duplicate `onReady` on a single
-player, not two players — it only sets `playerReady = true` twice. Worth knowing, not worth
-fixing blind.
+### Then three tracks were added, and the music half ran
 
-### What is still unrun, and why
+**The `musicOn` safety rule holds.** With a track "playing", `open up`, `lights off`,
+`battle mode`, `at your service`, `open up the faceplate now` and `turn the lights off` were
+every one ignored — the faceplate never moved, nothing was spoken. `jarvis stop the music` got
+through and stopped it. The gear stayed reachable with music on, and STOP MUSIC stopped
+playback on a real click. The round-2 trap (no way out but a reload) is not present.
 
-Everything left needs a voice, a speaker, or a real YouTube id — and a guessed id is the one
-thing this repo will not do. Specifically: what a **song actually transcribes as** (the
-measurement the whole `musicOn` rule rests on), "Jarvis, stop the music", the gear **with music
-playing**, the STOP MUSIC button, and the `(NNNN ms after the interrupt)` arm timing. §3 below
-is still the script for that run; paste two or three links you have watched into Settings →
-Music first.
+**No sound was ever produced, and the reason is not the app.** All three tracks were official
+Marvel/VEVO uploads and every one returned **player error 150** — the rights holder disallows
+embedded playback. Those ids can never play in the helmet. **Before adding a track, check it
+embeds**; an id that errors 150 is not a fixable app problem.
+
+**Three defects were found on the way there and are fixed** (see `BACKLOG.md` §2 for the full
+reasoning): `parseTracks` silently turned a bare pasted link into a track *named after its own
+URL*, which he read aloud as the title; the player was built without `origin`, which suppressed
+`onError` entirely and turned an unplayable video into an unbounded **silent** buffer; and
+nothing bounded "the track never started", so `musicOn` could stay true — gates suspended,
+helmet name-only — for a song nobody could hear. All three fixed, `check.mjs` green at 26, JS
+parses, and the new guard verified in the browser in both directions (fires when a load never
+starts, silent after a deliberate stop).
+
+### What is still unrun
+
+- **What a song actually transcribes as** — the measurement the whole `musicOn` rule rests on.
+  It needs a track that embeds; none of the three did.
+- **The arm timing** `(NNNN ms after the interrupt)`, and anything needing a real voice.
+- **`locate()`** — the run set coordinates directly, so the geolocation prompt is still unseen.
+- A `reviewer` pass. `CLAUDE.md` asks for one on a finished diff touching the music safety
+  path, and this diff does. It was not run this session.

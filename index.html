@@ -1759,7 +1759,14 @@ function parseTracks(text){
     const t = line.trim();
     if (!t) return;
     const eq = t.indexOf('=');
-    if (eq < 0){ bad.push(t); return; }
+    /* A pasted watch URL carries its own "=" - youtube.com/watch?v=ID - so
+       splitting on the first one leaves a "name" of https://www.youtube.com/watch?v
+       and an id that parses cleanly. That is a line with no name, not a named
+       track, and it was accepted in silence until 2026-08-28: three pasted
+       links became three tracks all called "https://www.youtube.com/watch?v",
+       which he then read out loud as the track title. A URL-shaped left side
+       is no name at all, so hand the line back and ask for one. */
+    if (eq < 0 || /:\/\/|^www\./.test(t.slice(0, eq).trim())){ bad.push(t); return; }
     const name = t.slice(0, eq).trim().toLowerCase();
     const id   = youtubeId(t.slice(eq + 1));
     if (!name || !id){ bad.push(t); return; }
@@ -1774,6 +1781,31 @@ function parseTracks(text){
 const MUSIC_FULL = 100, MUSIC_DUCK = 12;
 let player = null, playerReady = false, musicOn = false, trackAt = 0;
 let musicFails = 0;   // consecutive player errors; see onError
+
+/* A track that never starts is silence, and from inside a helmet silence is
+   indistinguishable from a dead router - which is why every other failure path
+   in here says so out loud. onError is not enough on its own: measured on
+   2026-08-28, a video that would not stream in an embed sat in BUFFERING with
+   getDuration() === 0 for over four minutes, and onError never fired once. The
+   only dependable signal is that PLAYING never arrived.
+
+   This is separate from the BUFFERING that onStateChange deliberately ignores.
+   That one is a stall mid-track with the sound coming back; this one is a
+   track that never made a sound at all, and it leaves musicOn true - so the
+   helmet has gone name-only, with the gates suspended, for a song nobody can
+   hear. Clearing musicOn is the point of the guard, not the apology.
+
+   Generous on purpose. With origin set, a video that refuses to embed now
+   fails properly through onError in well under a second, so this is only ever
+   the backstop for a failure that announces itself in no other way - and the
+   competing risk is killing a track that is merely slow to start on helmet
+   wifi. Twenty seconds of silence after "Playing X" is already too long from
+   inside a helmet, and long enough that a track which was going to start
+   would have started. */
+const MUSIC_START_MS = 20000;
+let startGuard = 0;
+
+function clearStartGuard(){ if (startGuard){ clearTimeout(startGuard); startGuard = 0; } }
 
 /* Created during boot() - a click - so the page has the user gesture Chrome
    requires before anything may play with sound. It starts muted for the same
@@ -1790,7 +1822,12 @@ function loadYouTube(){
 window.onYouTubeIframeAPIReady = () => {
   player = new YT.Player('tube', {
     height: '90', width: '160',
-    playerVars: { playsinline: 1, controls: 0, rel: 0 },
+    /* origin is not optional in practice. Without it, measured on 2026-08-28,
+       the player never received the video metadata at all - getDuration()
+       stayed 0 for minutes while the same id in a player built with origin
+       reported 128 s. It does not by itself make a blocked video play, but
+       without it there is nothing to diagnose from. */
+    playerVars: { playsinline: 1, controls: 0, rel: 0, origin: location.origin },
     events: {
       onReady: () => {
         playerReady = true;
@@ -1812,6 +1849,7 @@ window.onYouTubeIframeAPIReady = () => {
            screen. */
         if (e.data === YT.PlayerState.PLAYING){
           musicFails = 0; musicOn = true; showPlayer(true);
+          clearStartGuard();   // it started; the never-started guard is spent
         }
         /* Paused - a stall, or the player deciding to stop - means the room is
            quiet again, so stop requiring his name. Said out loud in the log
@@ -1921,6 +1959,27 @@ function startTrack(auto){
   showPlayer(true);
   console.log('[JARVIS] music: "' + t.name + '" (' + t.id + ')' + (auto ? ' - auto' : ''));
   if (!auto) speak('Playing ' + t.name + '.');
+
+  clearStartGuard();
+  startGuard = setTimeout(() => {
+    startGuard = 0;
+    if (!musicOn) return;
+    let st = -1;
+    try { st = player.getPlayerState(); } catch(e){}
+    if (st === YT.PlayerState.PLAYING) return;
+    // Hand the listening path back first, then explain. The order matters: if
+    // speak() throws, he must still be able to hear "stop the music".
+    musicOn = false;
+    showPlayer(false);
+    try { player.stopVideo(); } catch(e){}
+    let dur = 0;
+    try { dur = player.getDuration(); } catch(e){}
+    console.log('[JARVIS] music: "' + t.name + '" never started (state ' + st +
+                ', duration ' + dur + ') - listening normally again');
+    speak(navigator.onLine
+      ? 'That one will not play, sir. Try another.'
+      : 'We are offline, sir. The music comes over the network, and it is not there.');
+  }, MUSIC_START_MS);
 }
 
 function nextTrack(auto){
@@ -1932,6 +1991,7 @@ function nextTrack(auto){
 function stopMusic(){
   musicOn = false;
   musicFails = 0;
+  clearStartGuard();   // stopped on purpose; do not apologise for it later
   showPlayer(false);
   if (playerReady){ try { player.stopVideo(); } catch(e){} }
   console.log('[JARVIS] music: stopped');
@@ -2823,9 +2883,16 @@ $('pSave').addEventListener('click', () => {
   const inFile = new Set(TRACKS.map(t => t.id));
   store.set('tracks', JSON.stringify(parsed.out.filter(t => !inFile.has(t.id))));
   loadTracks();
-  if (parsed.bad.length)
+  /* Spoken for the same reason the geocoder failure below is: the panel has
+     already closed and looks as though it worked, and a list that silently
+     lost its lines is only discovered when he is asked for music and has
+     none. The commonest bad line by far is a bare pasted link. */
+  if (parsed.bad.length){
     console.log('[JARVIS] music: could not read ' + parsed.bad.length +
                 ' line(s): ' + parsed.bad.join(' | '));
+    speak(parsed.bad.length + (parsed.bad.length === 1 ? ' music line needs' : ' music lines need') +
+          ' a name, sir. Write the name, then equals, then the link.');
+  }
   /* Resolved off the speaking path, on a Save tap, and never blocking the
      panel from closing: a geocoder that is slow or down must not make Settings
      feel broken. Blank means fall back to the phone's own fix. */
