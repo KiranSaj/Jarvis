@@ -2,7 +2,8 @@
 
 **Item:** Phases 3 (weather) and 4 (music), both written, gates green, **never run in a
 browser.**
-**State:** `node check.mjs` → 26 checks. JS parses. Everything uncommitted.
+**State:** `node check.mjs` → 26 checks. JS parses. **Committed** as `0ead3fb`; working tree
+clean. Committed is not verified — nothing below has run in a browser.
 
 Three unverified bodies of work now sit in one tree: the arming/follow-up work from earlier
 today (reviewer APPROVED), Phase 3, and Phase 4 (reviewer APPROVED on round 4, after
@@ -97,4 +98,12 @@ Caddyfile, because RSS has no CORS.
 
 ## Files touched this session
 
-`index.html`, `check.mjs`, `CLAUDE.md`, `BACKLOG.md`, `HANDOFF.md`. Nothing committed.
+`index.html`, `check.mjs`, `CLAUDE.md`, `BACKLOG.md`, `HANDOFF.md` — all in `0ead3fb`.
+
+## Session of 2026-08-28 (background job): nothing new run
+
+Gates re-run green (26 checks). Server confirmed up on `http://localhost:8000/` — a literal
+`localhost` origin, so the microphone, Web Bluetooth and wake-lock all work there; Docker/Caddy
+was not running. Ollama answering on :11434. **No browser run happened**: this session had no
+working Chrome automation, and the run §3 asks for needs a microphone and a speaker anyway.
+The list in §3 is still the next step, unchanged and untouched.
