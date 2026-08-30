@@ -90,6 +90,24 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
 #heard{color:var(--ink-dim);letter-spacing:.1em;text-transform:uppercase;min-height:1.4em}
 #said{color:var(--ink);margin-top:.5rem;max-height:5.5em;overflow:hidden}
 
+/* Weather widget. Top, not bottom: #feed already owns the bottom band and
+   both music controls own the lower-left, so the strip between the corner
+   status lines and the reactor's own top edge is the one clear spot left.
+   Unverified against a real phone's aspect ratio - the first thing to check
+   in a browser, same as every other HUD placement in this file. Faded via
+   opacity/transform rather than display, so the transition actually plays. */
+#wxCard{position:fixed;top:3.6rem;left:50%;width:min(72vw,300px);
+  transform:translateX(-50%) translateY(-6px);padding:.85rem 1.1rem;border-radius:6px;
+  background:rgba(3,8,15,.72);border:1px solid var(--cyan);text-align:center;
+  z-index:6;opacity:0;pointer-events:none;transition:opacity .4s ease,transform .4s ease}
+#wxCard.show{opacity:1;transform:translateX(-50%) translateY(0)}
+#wxIcon{font-size:2rem;line-height:1;filter:drop-shadow(0 0 6px var(--cyan))}
+#wxTemp{font-family:var(--display);font-size:1.7rem;letter-spacing:.08em;
+  color:var(--cyan-hot);margin-top:.15rem}
+#wxPlace{font-size:.66rem;letter-spacing:.2em;text-transform:uppercase;color:var(--ink);
+  margin-top:.3rem;min-height:1em}
+#wxRain{font-size:.66rem;letter-spacing:.12em;color:var(--ink-dim);margin-top:.2rem}
+
 #gear{position:absolute;bottom:1.2rem;right:1.2rem;width:44px;height:44px;opacity:.16;
   border:1px solid var(--ink);border-radius:50%;cursor:pointer}
 
@@ -161,6 +179,17 @@ body.speaking #reactor{animation:pulseFast .55s ease-in-out infinite}
   </div>
 
   <div id="stateLabel">Standby</div>
+
+  <!-- Weather widget: appears only around a live weather answer, driven
+       entirely from showWxCard()/hideWxCard() near weather() in the script.
+       Never idle HUD chrome, and purely decorative - nothing here is read
+       aloud or gates anything. -->
+  <div id="wxCard">
+    <div id="wxIcon"></div>
+    <div id="wxTemp"></div>
+    <div id="wxPlace"></div>
+    <div id="wxRain"></div>
+  </div>
 
   <div id="feed">
     <div id="heard"></div>
@@ -2077,6 +2106,21 @@ const SKY = {
 };
 function skyPhrase(code){ return SKY[code] || 'hard to read from here'; }
 
+/* Same groupings skyPhrase() speaks from, so the widget's icon can never
+   contradict the words he was just told. Not spoken - a glyph, not a
+   sentence - so it does not go through contentOK() or the ASCII rule. */
+function skyIcon(code){
+  if (code === 0 || code === 1) return '☀️';
+  if (code === 2)               return '⛅';
+  if (code === 3)               return '☁️';
+  if (code === 45 || code === 48) return '🌫️';
+  if ([51,53,55,56,57].includes(code)) return '🌦️';
+  if ([61,63,65,66,67,80,81,82].includes(code)) return '🌧️';
+  if ([71,73,75,77,85,86].includes(code)) return '❄️';
+  if (code === 95 || code === 96 || code === 99) return '⛈️';
+  return '☁️';
+}
+
 /* What to put on before going out. Ordered by what matters most: cold beats
    rain, because being cold is the thing he will not tell anyone about. */
 function kitAdvice(t, rain){
@@ -2127,19 +2171,56 @@ async function fetchJSON(url, ms){
   } finally { clearTimeout(timer); }
 }
 
+/* Pure, so check.mjs can decide it against synthetic replies: city is what
+   he means by a place, locality covers a village too small to be one, and
+   the subdivision/country are what is left in the middle of nowhere. Never
+   the coordinates themselves - if none of these exist there is no name to
+   give him, and the caller has to say nothing about where rather than fall
+   back to digits. */
+function placeLabel(hit){
+  if (!hit) return '';
+  return hit.city || hit.locality || hit.principalSubdivision || hit.countryName || '';
+}
+
+/* BigDataCloud's client-side reverse lookup - no key, CORS enabled, same
+   guarantee as Open-Meteo's own geocoder. Used so a location fixed by GPS,
+   or typed into Settings as a bare "lat, lon", gets a real name to speak
+   instead of the numbers. Throws on no name found rather than returning ''
+   so every caller has to make its own choice to stay quiet about place,
+   never to speak coordinates as if they were one. */
+async function reverseGeocode(lat, lon){
+  const d = await fetchJSON('https://api.bigdatacloud.net/data/reverse-geocode-client' +
+                            '?latitude=' + encodeURIComponent(lat) +
+                            '&longitude=' + encodeURIComponent(lon) +
+                            '&localityLanguage=en', 5000);
+  const label = placeLabel(d);
+  if (!label) throw new Error('no name for those coordinates');
+  return label;
+}
+
 function haveLocation(){ return !!(cfg.lat && cfg.lon); }
 
 /* One prompt, then it is stored. Geolocation needs a secure context, which the
-   helmet already has - the microphone would not work without one either. */
+   helmet already has - the microphone would not work without one either. A
+   failed reverse-geocode never fails the fix itself: the coordinates are
+   still good for the forecast, and the one thing worse than not naming the
+   place is speaking the digits instead. */
 function locate(){
   return new Promise((resolve, reject) => {
     if (!navigator.geolocation) return reject(new Error('no geolocation here'));
     navigator.geolocation.getCurrentPosition(
-      pos => {
+      async pos => {
         cfg.lat = pos.coords.latitude.toFixed(3);
         cfg.lon = pos.coords.longitude.toFixed(3);
         store.set('lat', cfg.lat); store.set('lon', cfg.lon);
         console.log('[JARVIS] location fixed at ' + cfg.lat + ', ' + cfg.lon);
+        try {
+          cfg.place = await reverseGeocode(cfg.lat, cfg.lon);
+          store.set('place', cfg.place);
+          console.log('[JARVIS] location named: ' + cfg.place);
+        } catch (err){
+          console.log('[JARVIS] reverse geocode failed: ' + err.message);
+        }
         resolve();
       },
       err => reject(new Error(err.message || 'refused')),
@@ -2154,12 +2235,38 @@ function wxUrl(){
          '&daily=precipitation_probability_max&timezone=auto&forecast_days=1';
 }
 
+/* The widget by #wxCard in the markup. Visual only, and purely decorative:
+   nothing here is read aloud, nothing here gates anything, and a phone with
+   the screen off or unwatched loses nothing but the picture. Shown the
+   moment a weather question is asked (a pulsing "..." while the fetch is in
+   flight, so it is not inert chrome) and faded out a few seconds after he
+   finishes speaking the answer - see the timing note by hideWxCard(). */
+let wxHideTimer = null;
+function showWxCard(reading, intent, place){
+  clearTimeout(wxHideTimer);
+  if (!reading){
+    $('wxIcon').textContent = '⋯';
+    $('wxTemp').textContent = '';
+    $('wxPlace').textContent = place || '';
+    $('wxRain').textContent = '';
+  } else {
+    $('wxIcon').textContent = skyIcon(reading.code);
+    $('wxTemp').textContent = Math.round(reading.tempC) + '°';
+    $('wxPlace').textContent = place || '';
+    $('wxRain').textContent = Math.round(reading.rainPct || 0) + '% chance of rain';
+  }
+  $('wxCard').classList.add('show');
+}
+function hideWxCard(){ $('wxCard').classList.remove('show'); }
+
 async function weather(question, intent){
   setState('Thinking');
+  showWxCard(null, intent, cfg.place);
   if (!haveLocation()){
     try { await locate(); }
     catch (err){
       console.log('[JARVIS] no location: ' + err.message);
+      hideWxCard();
       speak('I do not know where we are, sir. Set our location in settings.');
       return;
     }
@@ -2185,23 +2292,38 @@ async function weather(question, intent){
       console.log('[JARVIS] weather: ' + w.tempC + ' C, code ' + w.code +
                   ', rain ' + w.rainPct + '%');
     }
-    speak(weatherLine(w, intent, cfg.place));
+    showWxCard(w, intent, cfg.place);
+    // Held open a few seconds past the end of the sentence so it can still
+    // be read after he stops talking, then faded - never left up as stale
+    // idle chrome for the rest of the session.
+    speak(weatherLine(w, intent, cfg.place))
+      .then(() => { wxHideTimer = setTimeout(hideWxCard, 4000); });
   } catch (err){
     // Named, because "he said nothing" and "the weather service was slow" look
     // identical from the helmet and only one of them is worth chasing.
     console.log('[JARVIS] weather failed: ' + err.message);
+    hideWxCard();
     speak(navigator.onLine
       ? 'I cannot reach the weather station just now, sir.'
       : 'We are offline, sir. I cannot see the sky from here.');
   }
 }
 
-/* Settings accepts a town name or a bare "lat, lon". The name is resolved by
-   Open-Meteo's geocoder - same terms, no key - and only ever on a Save tap,
-   never on the speaking path. */
+/* Settings accepts a town name or a bare "lat, lon". A name is resolved by
+   Open-Meteo's geocoder - same terms, no key. Bare coordinates are resolved
+   the other way, through reverseGeocode(): typing digits must never mean he
+   hears digits back. A failed reverse lookup leaves label '' - the caller
+   below still keeps the coordinates as a usable fix, it just says nothing
+   about where. Only ever runs on a Save tap, never on the speaking path. */
 async function resolvePlace(text){
   const m = text.match(/^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/);
-  if (m) return { lat: m[1], lon: m[2], label: '' };
+  if (m){
+    const lat = m[1], lon = m[2];
+    let label = '';
+    try { label = await reverseGeocode(lat, lon); }
+    catch (err) { console.log('[JARVIS] reverse geocode failed: ' + err.message); }
+    return { lat, lon, label };
+  }
   const d = await fetchJSON('https://geocoding-api.open-meteo.com/v1/search?count=1&name=' +
                             encodeURIComponent(text), 6000);
   const hit = d.results && d.results[0];
@@ -2595,7 +2717,7 @@ function fillVoiceList(){
 
 /* The mic stays live through speech so he can cut in - see tryInterrupt for
    the guards that stop the helmet hearing itself and looping. */
-function speak(text){ speakAwait(text); }
+function speak(text){ return speakAwait(text); }
 
 /* Cancelling one utterance fires its end event a tick later. Without knowing
    which utterance that event belongs to, a cancel meant for the previous line
@@ -2905,7 +3027,11 @@ $('pSave').addEventListener('click', () => {
     wxCache = null;
   } else if (placeText !== cfg.place){
     resolvePlace(placeText).then(r => {
-      cfg.lat = r.lat; cfg.lon = r.lon; cfg.place = r.label || placeText;
+      // Never fall back to placeText here: for a typed name it is already
+      // r.label (the geocoder always returns hit.name for a hit), and for
+      // typed coordinates falling back would put the digits themselves back
+      // into cfg.place - the exact bug reverseGeocode() exists to prevent.
+      cfg.lat = r.lat; cfg.lon = r.lon; cfg.place = r.label;
       ['lat','lon','place'].forEach(k => store.set(k, cfg[k]));
       wxCache = null;   // a new place invalidates the old sky
       console.log('[JARVIS] location set to ' + (cfg.place || 'those coordinates') +

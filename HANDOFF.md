@@ -171,3 +171,56 @@ starts, silent after a deliberate stop).
 - **`locate()`** — the run set coordinates directly, so the geolocation prompt is still unseen.
 - A `reviewer` pass. `CLAUDE.md` asks for one on a finished diff touching the music safety
   path, and this diff does. It was not run this session.
+
+## Session of 2026-08-30: weather said coordinates instead of a place, plus a widget
+
+**Item:** he was hearing the raw `lat, lon` he'd typed (or a value carried over from a GPS
+fix) spoken back as if it were a place name, and there was no visual for a weather answer
+beyond the spoken line. Both fixed, **neither run in a browser.**
+
+**Root cause of the coordinates bug**, found in `weather()`/`resolvePlace()`: Settings accepts
+a bare `"lat, lon"` as a valid location (documented behaviour), and the Settings box also
+pre-fills with raw coordinates whenever `cfg.place` is empty (i.e. right after a silent GPS
+fix, before anyone ever types a town). `resolvePlace()` returned `label: ''` for that
+coordinate case, and the save handler's `cfg.place = r.label || placeText` fell back to the
+*typed digits* — so hitting Save for any reason (even just toggling Live on) after a GPS fix
+would silently turn a coordinate pair into the "place" `weatherLine()` speaks. Two ways in,
+same bug.
+
+**Fix:** a new `reverseGeocode(lat, lon)` (BigDataCloud's client-side reverse lookup — no
+key, CORS enabled, same guarantee this repo already leans on for Open-Meteo) resolves
+coordinates to a real name, used from both `resolvePlace()` (typed `"lat, lon"`) and `locate()`
+(a fresh GPS fix). `placeLabel(hit)` is the pure part (`city || locality ||
+principalSubdivision || countryName || ''`), covered in `check.mjs` and mutation-tested. The
+settings save handler no longer falls back to `placeText` at all (`cfg.place = r.label`) — a
+failed reverse-geocode now means *no place is mentioned*, never that the digits get spoken.
+That fallback-removal is the actual fix; the reverse-geocode call is what makes "no place
+mentioned" the rare case instead of the common one.
+
+**Unverified, and the first thing to check in a browser:** `api.bigdatacloud.net` has never
+actually been called — this sandbox's egress proxy blocks every external host, `open-meteo.com`
+included, so nothing live could be exercised this session. Ask a first weather question after a
+fresh GPS fix and check the console for `location named: ...` (success) versus `reverse geocode
+failed: ...` (falls back to no place, not to digits — confirm it never says a number). Then
+type a bare `"51.5, -0.1"` into Settings → Location, Save, and ask again: same two outcomes,
+never digits.
+
+**Weather widget**, new: a dashboard-style card (`#wxCard`) — icon, temperature, place, rain
+chance — shown the moment a weather question is asked (a pulsing "..." while the fetch is in
+flight) and faded a few seconds after `speak()` finishes the answer. `speak()` now returns
+`speakAwait()`'s promise (previously discarded) so the widget can time its fade off real speech
+completion rather than a guess; checked every existing caller of `speak()` first — none used the
+return value, so this is not a behaviour change anywhere else. `skyIcon(code)` groups WMO codes
+the same way `skyPhrase()` does, covered in `check.mjs` by asserting each group shares one icon
+and distinct groups don't collide — the first version of that check was vacuous (the fallback
+icon makes "does it return something" untestable) and was mutation-tested into something that
+actually catches a group falling through to the wrong icon.
+
+**Unverified, and the second thing to check in a browser:** the card's placement (`top:3.6rem`,
+centred, `width:min(72vw,300px)`) was reasoned from the CSS against the reactor's own
+`top:50%` centring, never seen on a real phone screen — on a short one it may sit closer to the
+reactor's top edge than intended. Also unconfirmed: that the fade-out actually fires (the
+`speak().then()` chain depends on `speakAwait()`'s `finish()` resolving, which it always has
+so far, watchdog included, but this exact chain is new).
+
+**Files touched this session:** `index.html`, `check.mjs`, `HANDOFF.md`, `BACKLOG.md`.

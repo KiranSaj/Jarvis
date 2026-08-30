@@ -5,7 +5,8 @@ things that cost hours to learn. **This** file is the moving part: what is done,
 queued, what is blocked. A cold session should be able to read `HANDOFF.md` plus this file
 and continue without asking anything.
 
-**Last updated:** 2026-08-28 (first browser run: Phase 3 verified, player initialises)
+**Last updated:** 2026-08-30 (weather place-name bug fixed, weather widget added — neither run
+in a browser yet, see `HANDOFF.md`)
 
 ---
 
@@ -151,6 +152,30 @@ leave-one-out, tightest margin 0.073.
   Clearing `musicOn` is the point: otherwise the helmet stays name-only with the gates
   suspended for a song nobody can hear. Verified both ways in the browser — it fires on a load
   that never starts, and does **not** fire after a deliberate stop.
+
+### Fixed 2026-08-30: weather spoke coordinates instead of a place name
+
+`weatherLine()`'s "in `<place>`" clause was, in two different paths, ending up with raw
+`lat, lon` text instead of a name: typing bare coordinates into Settings (a documented input)
+and, separately, re-saving Settings after a silent GPS fix (the box pre-fills with coordinates
+whenever `cfg.place` is empty). Both went through `resolvePlace()`'s `label: '' → || placeText`
+fallback, which is what turned digits into a spoken "place". Fixed with a new
+`reverseGeocode()`/`placeLabel()` pair (BigDataCloud's client-side reverse lookup, no key, CORS
+enabled) called from both `resolvePlace()` and `locate()`, and by removing the `|| placeText`
+fallback entirely — a failed reverse-geocode now means no place is mentioned, never that the
+coordinates are. See `HANDOFF.md` for what still needs a real browser to confirm (the API call
+itself has never been reached — this environment's egress proxy blocks it, `open-meteo.com`
+included).
+
+### Added 2026-08-30: a weather widget, unverified
+
+A dashboard-style HUD card (`#wxCard`) — icon, temperature, place, rain chance — shown only
+around a live weather answer: appears the moment the question is asked, fades a few seconds
+after `speak()` finishes the sentence. `speak()` now returns its promise (checked every
+existing caller first; none used the old return value, which was always discarded). Purely
+decorative — nothing in it is spoken, gated, or read by `contentOK()`. **Never seen on a real
+phone screen** — its placement was reasoned from the CSS against the reactor's own centring,
+not observed, and is the first thing to check in a browser (see `HANDOFF.md`).
 
 ## 3. Queued
 

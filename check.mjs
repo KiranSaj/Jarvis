@@ -908,7 +908,7 @@ try {
    weatherLine() is pure, so it can be fed the extremes a real week will not
    produce - minus twenty-five, a hundred percent rain, thundery with hail. */
 
-let LIVE, SKY, weatherLine, kitAdvice, skyPhrase;
+let LIVE, SKY, weatherLine, kitAdvice, skyPhrase, skyIcon;
 try {
   const wxBox = { console: { log: () => {} } };
   vm.createContext(wxBox);
@@ -916,12 +916,13 @@ try {
     slice('const LIVE = [', NL + '];') + NL +
     slice('const SKY = {', NL + '};') + NL +
     slice('function skyPhrase(code){', '}') + NL +
+    slice('function skyIcon(code){', NL + '}') + NL +
     slice('function kitAdvice(t, rain){', NL + '}') + NL +
     slice('function article(n){', NL + '}') + NL +
     slice('function weatherLine(w, intent, place){', NL + '}') + NL +
-    ';({ LIVE, SKY, skyPhrase, kitAdvice, weatherLine })', wxBox);
-  ({ LIVE, SKY, skyPhrase, kitAdvice, weatherLine } =
-    vm.runInContext('({ LIVE, SKY, skyPhrase, kitAdvice, weatherLine })', wxBox));
+    ';({ LIVE, SKY, skyPhrase, skyIcon, kitAdvice, weatherLine })', wxBox);
+  ({ LIVE, SKY, skyPhrase, skyIcon, kitAdvice, weatherLine } =
+    vm.runInContext('({ LIVE, SKY, skyPhrase, skyIcon, kitAdvice, weatherLine })', wxBox));
 } catch (err) {
   fail('the weather functions can be extracted', err.message);
 }
@@ -970,6 +971,20 @@ if (weatherLine) {
   if (uglyCode.length) wrongSky.push('  not plain ASCII: ' + uglyCode.join(', '));
   // The fallback has to survive a code nobody has seen yet.
   if (!skyPhrase(1234)) wrongSky.push('  an unknown code produces nothing at all');
+  // skyIcon() has a catch-all fallback, so "does it return something" can
+  // never fail - mutation-tested and confirmed vacuous before this was
+  // written the other way. What can actually go wrong: a group falling
+  // through to the fallback instead of its own icon, silently colliding
+  // with an unrelated one - so check that codes meaning the same kind of
+  // weather share an icon, and different kinds do not share one.
+  const CLEAR = [0,1], RAIN = [61,63,65,80,81,82], SNOW = [71,73,75,85,86], STORM = [95,96,99];
+  const iconsAgree = (codes) => new Set(codes.map(skyIcon)).size === 1;
+  if (!iconsAgree(CLEAR)) wrongSky.push('  clear codes do not share an icon');
+  if (!iconsAgree(RAIN))  wrongSky.push('  rain codes do not share an icon');
+  if (!iconsAgree(SNOW))  wrongSky.push('  snow codes do not share an icon');
+  if (!iconsAgree(STORM)) wrongSky.push('  storm codes do not share an icon');
+  const distinctKinds = new Set([0, 3, 45, 61, 71, 95].map(skyIcon));
+  if (distinctKinds.size < 6) wrongSky.push('  two different kinds of weather share an icon');
   if (wrongSky.length) fail('every weather code has words of its own', wrongSky.join(NL));
   else ok();
 
@@ -1010,6 +1025,42 @@ if (weatherLine) {
   if (!/coat/i.test(kitAdvice(15, 80)))
     wrongLine.push('  at 15 degrees and 80% rain he is not told to take a coat');
   if (wrongLine.length) fail('everything he is told about the weather is sayable', wrongLine.join(NL));
+  else ok();
+}
+
+/* ---------- 22. a reverse-geocode reply names a place, never digits ---------- */
+/* placeLabel() is pure, so it can be fed the shapes a reverse-geocode reply
+   actually takes without a network call: a city, a village too small to
+   count as one on its own, open countryside, and a reply with nothing
+   usable at all - the case that must come back '' so the caller says
+   nothing about where rather than ever falling back to the coordinates it
+   looked up. */
+
+let placeLabel;
+try {
+  const placeBox = { console: { log: () => {} } };
+  vm.createContext(placeBox);
+  vm.runInContext(
+    slice('function placeLabel(hit){', NL + '}') + NL +
+    ';({ placeLabel })', placeBox);
+  ({ placeLabel } = vm.runInContext('({ placeLabel })', placeBox));
+} catch (err) {
+  fail('placeLabel can be extracted', err.message);
+}
+
+if (placeLabel) {
+  const wrongPlace = [];
+  if (placeLabel({ city: 'Reading', locality: 'Whitley', principalSubdivision: 'England', countryName: 'UK' }) !== 'Reading')
+    wrongPlace.push('  a city is not preferred over the rest');
+  if (placeLabel({ locality: 'Chalfont St Giles', principalSubdivision: 'England', countryName: 'UK' }) !== 'Chalfont St Giles')
+    wrongPlace.push('  a locality is not used when there is no city');
+  if (placeLabel({ principalSubdivision: 'Nunavut', countryName: 'Canada' }) !== 'Nunavut')
+    wrongPlace.push('  a subdivision is not used when there is no city or locality');
+  if (placeLabel({ countryName: 'Antarctica' }) !== 'Antarctica')
+    wrongPlace.push('  a country is not used as the last resort');
+  if (placeLabel({}) !== '' || placeLabel(null) !== '' || placeLabel({ city: '' }) !== '')
+    wrongPlace.push('  an empty reply produces something other than ""');
+  if (wrongPlace.length) fail('a place name always prefers a real name over nothing', wrongPlace.join(NL));
   else ok();
 }
 
